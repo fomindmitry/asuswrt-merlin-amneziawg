@@ -311,6 +311,10 @@ setup_firewall(){
         fi
     fi
 
+    # --- Flush conntrack so devices reconnect through VPN ---
+    conntrack -F 2>/dev/null
+    log_msg "Conntrack flushed"
+
     # --- Setup auto-update cron ---
     if [ "$(get_setting awg_geo_autoupdate)" = "1" ]; then
         cru a awg_geo_update "0 4 * * * $ADDON_DIR/amneziawg.sh update_geo"
