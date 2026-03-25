@@ -997,9 +997,9 @@ function initAutocompleteIp(){
                 <div id="geo_section" style="display:none;">
 
                 <div style="background:#1a1a2e; border:1px solid #91071f; border-radius:4px; padding:10px 14px; margin-top:10px; font-size:12px; color:#e0a050;">
-                    <b>Important:</b> VPN Geo routing requires devices to use the router as DNS server (192.168.1.1).<br>
-                    iPhone: Settings &gt; Wi-Fi &gt; (i) &gt; DNS &gt; Manual &gt; 192.168.1.1 only.<br>
-                    macOS/Windows: set DNS to router IP in network settings. Disable DNS-over-HTTPS in browser.
+                    <b>Важно:</b> Для работы VPN Geo устройства должны использовать роутер как DNS-сервер.<br>
+                    iPhone: Настройки &gt; Wi-Fi &gt; (i) &gt; DNS &gt; Вручную &gt; только IP роутера.<br>
+                    macOS/Windows: укажите IP роутера как DNS в настройках сети. Отключите DNS-over-HTTPS в браузере.
                 </div>
 
                 <table width="100%" border="1" cellpadding="4" cellspacing="0" class="FormTable" style="margin-top:8px;">
