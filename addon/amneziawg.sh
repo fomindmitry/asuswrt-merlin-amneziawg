@@ -768,6 +768,7 @@ do_service_event(){
         awgrestart)     do_stop; sleep 5; do_start ;;
         awgsaveconf)
             generate_config
+            update_status
             update_geo_if_needed
             is_running && setup_firewall
             update_status
