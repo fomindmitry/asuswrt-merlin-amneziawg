@@ -4,7 +4,7 @@
 # Userspace amneziawg-go, per-device policy routing, GeoIP/GeoSite
 # =============================================================
 
-AWG_VERSION="1.0.9"
+AWG_VERSION="1.1.0"
 ADDON_DIR="/jffs/addons/amneziawg"
 AWG_DIR="/opt/amneziawg"
 CONF="$AWG_DIR/awg0.conf"
@@ -862,11 +862,10 @@ do_update(){
     wait_for "! pidof amneziawg-go >/dev/null 2>&1" 10
     opkg install "$tmp"
     rm -f "$tmp"
-    sleep 2
-    # Run install_page and start from the NEW script
+    # Install page from new version
     /jffs/addons/amneziawg/amneziawg.sh install_page
-    /jffs/addons/amneziawg/amneziawg.sh start
-    log_msg "Update complete"
+    log_msg "Update complete. Start VPN from UI."
+    update_status
 }
 
 # --- Service event dispatcher ---

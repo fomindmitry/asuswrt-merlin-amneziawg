@@ -161,18 +161,16 @@ function showVersionInfo(currentIgnored, latest, hasUpdateIgnored){
 }
 
 function doUpdate(){
-    if(!confirm('Update AmneziaWG to latest version?\nVPN will be stopped during update.')) return;
+    if(!confirm('Update AmneziaWG?\nVPN will be stopped. After update click Start.')) return;
     var badge = document.getElementById('awg_badge');
     badge.className = 'awg-status connecting';
     badge.innerHTML = '&#9679; Updating...';
-    var log = document.getElementById('awg_log');
-    if(log) log.innerHTML = 'Downloading and installing update...';
     if(statusTimer){ clearInterval(statusTimer); statusTimer = null; }
 
     document.form.action_script.value = "start_awgdoupdate";
     document.form.submit();
 
-    // Poll until update completes (VPN restarts with new version)
+    // Wait for update to finish (VPN stopped, new version installed), then reload
     var attempts = 0;
     setTimeout(function(){
         var poll = setInterval(function(){
@@ -183,15 +181,16 @@ function doUpdate(){
             xhr.onload = function(){
                 try {
                     var s = JSON.parse(xhr.responseText);
-                    if(s.running || attempts >= 90){
+                    // Update done when VPN is stopped (do_update stops it)
+                    if(!s.running || attempts >= 120){
                         clearInterval(poll);
                         location.reload();
                     }
                 } catch(e){
-                    if(attempts >= 90){ clearInterval(poll); location.reload(); }
+                    if(attempts >= 120){ clearInterval(poll); location.reload(); }
                 }
             };
-            xhr.onerror = function(){ if(attempts >= 90){ clearInterval(poll); location.reload(); } };
+            xhr.onerror = function(){ if(attempts >= 120){ clearInterval(poll); location.reload(); } };
             xhr.send();
         }, 2000);
     }, 5000);
