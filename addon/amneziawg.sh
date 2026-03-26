@@ -4,7 +4,7 @@
 # Userspace amneziawg-go, per-device policy routing, GeoIP/GeoSite
 # =============================================================
 
-AWG_VERSION="1.0.8"
+AWG_VERSION="1.0.9"
 ADDON_DIR="/jffs/addons/amneziawg"
 AWG_DIR="/opt/amneziawg"
 CONF="$AWG_DIR/awg0.conf"
@@ -862,6 +862,7 @@ do_update(){
     wait_for "! pidof amneziawg-go >/dev/null 2>&1" 10
     opkg install "$tmp"
     rm -f "$tmp"
+    sleep 2
     # Run install_page and start from the NEW script
     /jffs/addons/amneziawg/amneziawg.sh install_page
     /jffs/addons/amneziawg/amneziawg.sh start
