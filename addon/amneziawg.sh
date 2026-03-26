@@ -1,7 +1,7 @@
 #!/bin/sh
 # =============================================================
-# AmneziaWG addon backend for ASUS GT-AX11000 (Merlin 388.x)
-# Refactored: unified firewall, MAC-based routing, no duplicates
+# AmneziaWG addon backend for Asuswrt-Merlin
+# Userspace amneziawg-go, per-device policy routing, GeoIP/GeoSite
 # =============================================================
 
 ADDON_DIR="/jffs/addons/amneziawg"
@@ -10,7 +10,6 @@ CONF="$AWG_DIR/awg0.conf"
 AWG_GO="$AWG_DIR/amneziawg-go"
 AWG_BIN="$AWG_DIR/awg"
 IFACE="awg0"
-AWG_PID="/var/run/amneziawg/${IFACE}.pid"
 STATUS_FILE="/www/user/awg_status.htm"
 SETTINGS="/jffs/addons/custom_settings.txt"
 CLIENTS_FILE="$AWG_DIR/clients.list"
@@ -22,6 +21,7 @@ DNSMASQ_INCLUDE="/jffs/configs/dnsmasq.conf.add"
 SCRIPT_NAME="amneziawg"
 RT_TABLE=300
 AWG_CHAIN="AWG"
+LOCKFILE="/tmp/.awg_lock"
 V2FLY_GEOIP_BASE="https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text"
 
 # --- Helpers ---
@@ -42,23 +42,76 @@ get_lan_net(){
     ip -4 route show dev br0 2>/dev/null | awk '$1 ~ /^[0-9]/ && $1 ~ /\// {print $1; exit}'
 }
 
+get_router_ip(){
+    ip -4 addr show br0 2>/dev/null | awk '/inet /{sub(/\/.*/, "", $2); print $2; exit}'
+}
+
+get_endpoint(){
+    awk -F'[ =:]+' '/^Endpoint/{print $2}' "$CONF" 2>/dev/null
+}
+
 disable_rp_filter(){
     for iface in all awg0 br0; do
         echo 0 > "/proc/sys/net/ipv4/conf/$iface/rp_filter" 2>/dev/null
     done
 }
 
+acquire_lock(){
+    local tries=0
+    while [ -f "$LOCKFILE" ] && [ $tries -lt 30 ]; do
+        sleep 1
+        tries=$((tries + 1))
+    done
+    echo $$ > "$LOCKFILE"
+}
+
+release_lock(){
+    rm -f "$LOCKFILE"
+}
+
 human_size(){
-    local bytes=$1
+    local bytes=${1:-0}
     if [ "$bytes" -ge 1073741824 ] 2>/dev/null; then
-        awk "BEGIN{printf \"%.1f GiB\", $bytes/1073741824}"
+        echo "$bytes" | awk '{printf "%.1f GiB", $1/1073741824}'
     elif [ "$bytes" -ge 1048576 ] 2>/dev/null; then
-        awk "BEGIN{printf \"%.1f MiB\", $bytes/1048576}"
+        echo "$bytes" | awk '{printf "%.1f MiB", $1/1048576}'
     elif [ "$bytes" -ge 1024 ] 2>/dev/null; then
-        awk "BEGIN{printf \"%.1f KiB\", $bytes/1024}"
+        echo "$bytes" | awk '{printf "%.1f KiB", $1/1024}'
     else
         echo "${bytes} B"
     fi
+}
+
+# Download a single GeoIP service list (IPv4 only)
+download_geoip_service(){
+    local svc="$1"
+    svc=$(echo "$svc" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
+    [ -z "$svc" ] && return 1
+    curl -sfL "${V2FLY_GEOIP_BASE}/${svc}.txt" 2>/dev/null | grep -v ":" > "$GEO_DIR/geoip/v2fly_${svc}.cidr"
+    [ -s "$GEO_DIR/geoip/v2fly_${svc}.cidr" ] || { rm -f "$GEO_DIR/geoip/v2fly_${svc}.cidr"; return 1; }
+}
+
+# Mount AmneziaWG tab into Merlin menu
+mount_menu_tree(){
+    local page="$1"
+    [ ! -f /tmp/menuTree.js ] && cp /www/require/modules/menuTree.js /tmp/
+    sed -i '/AmneziaWG/d' /tmp/menuTree.js
+    sed -i "/url: \"Advanced_VPN_OpenVPN.asp\"/a {url: \"$page\", tabName: \"AmneziaWG\"}," /tmp/menuTree.js
+    umount /www/require/modules/menuTree.js 2>/dev/null
+    mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js
+}
+
+# Bulk-load CIDR file into ipset using restore (much faster than individual adds)
+ipset_load_file(){
+    local file="$1"
+    local setname="$2"
+    [ ! -f "$file" ] && return
+    awk -v s="$setname" '
+        /^[0-9]/ && !/^#/ {
+            gsub(/[[:space:]\r]/, "")
+            if ($0 != "") print "add " s " " $0 " timeout 0"
+        }
+    ' "$file" | ipset restore -! 2>/dev/null
 }
 
 # --- Unified firewall setup ---
@@ -75,7 +128,7 @@ cleanup_firewall(){
 
     # Remove DNS interception rules
     local router_ip
-    router_ip=$(ip -4 addr show br0 2>/dev/null | awk '/inet /{sub(/\/.*/, "", $2); print $2; exit}')
+    router_ip=$(get_router_ip)
     [ -z "$router_ip" ] && router_ip="192.168.1.1"
     iptables -t nat -D PREROUTING -i br0 -p udp --dport 53 -j DNAT --to "$router_ip" 2>/dev/null
     iptables -t nat -D PREROUTING -i br0 -p tcp --dport 53 -j DNAT --to "$router_ip" 2>/dev/null
@@ -108,20 +161,15 @@ setup_firewall(){
     [ -z "$default_policy" ] && default_policy="direct"
     local has_geo=false
 
-    # --- Create ipset (always, needed for geo rules) ---
+    # --- Create ipset ---
     ipset create "$IPSET_NAME" hash:net family inet hashsize 4096 maxelem 131072 timeout 86400 2>/dev/null
 
-    # --- Load GeoIP subnets into ipset ---
+    # --- Load GeoIP subnets into ipset (bulk) ---
     local ip_count=0
     for f in "$GEO_DIR"/geoip/*.cidr; do
         [ ! -f "$f" ] && continue
-        while read -r cidr; do
-            cidr=$(echo "$cidr" | tr -d ' \r')
-            [ -z "$cidr" ] && continue
-            echo "$cidr" | grep -q '^#' && continue
-            ipset add "$IPSET_NAME" "$cidr" timeout 0 2>/dev/null
-            ip_count=$((ip_count + 1))
-        done < "$f"
+        ipset_load_file "$f" "$IPSET_NAME"
+        ip_count=$((ip_count + $(wc -l < "$f")))
     done
 
     # --- Extract v2fly domains from downloaded database ---
@@ -190,11 +238,11 @@ setup_firewall(){
     # --- Create custom chain in mangle table ---
     iptables -t mangle -N "$AWG_CHAIN" 2>/dev/null || iptables -t mangle -F "$AWG_CHAIN"
 
-    # --- Exclusion rules (evaluated first — protect system traffic) ---
+    # --- Exclusion rules (evaluated first) ---
     local lan_net
     lan_net=$(get_lan_net)
     local endpoint
-    endpoint=$(grep "^Endpoint" "$CONF" 2>/dev/null | cut -d= -f2 | tr -d ' ' | cut -d: -f1)
+    endpoint=$(get_endpoint)
 
     iptables -t mangle -A "$AWG_CHAIN" -m addrtype --dst-type LOCAL -j RETURN
     [ -n "$lan_net" ] && iptables -t mangle -A "$AWG_CHAIN" -d "$lan_net" -j RETURN
@@ -284,14 +332,11 @@ setup_firewall(){
     # --- Force DNS through dnsmasq (defeat DoH/DoT on devices) ---
     if [ "$has_geo" = true ]; then
         local router_ip
-        router_ip=$(ip -4 addr show br0 2>/dev/null | awk '/inet /{sub(/\/.*/, "", $2); print $2; exit}')
+        router_ip=$(get_router_ip)
         [ -z "$router_ip" ] && router_ip="192.168.1.1"
-        # Redirect all DNS to router
         iptables -t nat -I PREROUTING -i br0 -p udp --dport 53 -j DNAT --to "$router_ip"
         iptables -t nat -I PREROUTING -i br0 -p tcp --dport 53 -j DNAT --to "$router_ip"
-        # Block DNS-over-TLS
         iptables -I FORWARD -i br0 -p tcp --dport 853 -j REJECT
-        # Block DNS-over-HTTPS to known providers
         local doh_ip
         for doh_ip in 8.8.8.8 8.8.4.4 1.1.1.1 1.0.0.1 9.9.9.9 149.112.112.112; do
             iptables -I FORWARD -i br0 -d "$doh_ip" -p tcp --dport 443 -j REJECT
@@ -304,19 +349,33 @@ setup_firewall(){
     if [ $domain_count -gt 0 ] || [ "$has_geo" = true ]; then
         service restart_dnsmasq >/dev/null 2>&1
         sleep 5
-        # Pre-resolve all configured domains to populate ipset immediately
+        # Pre-resolve domains to populate ipset (parallel, max 10 at a time)
         if [ -f "$DNSMASQ_AWG_CONF" ]; then
+            local bg_count=0
             awk -F/ '/^ipset=/{for(i=2;i<NF;i++)print $i}' "$DNSMASQ_AWG_CONF" | while read -r domain; do
-                [ -n "$domain" ] && nslookup "$domain" 127.0.0.1 >/dev/null 2>&1
+                [ -z "$domain" ] && continue
+                nslookup "$domain" 127.0.0.1 >/dev/null 2>&1 &
+                bg_count=$((bg_count + 1))
+                [ $bg_count -ge 10 ] && { wait; bg_count=0; }
             done
+            wait
         fi
     fi
 
-    # --- Flush conntrack so devices reconnect through VPN ---
-    conntrack -F 2>/dev/null
-    log_msg "Conntrack flushed"
+    # --- Flush conntrack for VPN-routed devices only ---
+    if [ -f "$CLIENTS_FILE" ] && [ -s "$CLIENTS_FILE" ]; then
+        while IFS=',' read -r dev_id name policy mac || [ -n "$dev_id" ]; do
+            dev_id=$(echo "$dev_id" | tr -d ' ')
+            [ -z "$dev_id" ] && continue
+            conntrack -D -s "$dev_id" 2>/dev/null
+        done < "$CLIENTS_FILE"
+    fi
+    # Also flush if default policy is VPN
+    case "$default_policy" in
+        vpn_all|vpn_geo) conntrack -F 2>/dev/null ;;
+    esac
 
-    # --- Setup auto-update cron ---
+    # --- Setup cron ---
     if [ "$(get_setting awg_geo_autoupdate)" = "1" ]; then
         cru a awg_geo_update "0 4 * * * $ADDON_DIR/amneziawg.sh update_geo"
     fi
@@ -339,7 +398,6 @@ update_geo_if_needed(){
     mkdir -p "$GEO_DIR/geoip" "$GEO_DIR/domains"
     local needed=false
 
-    # Check GeoIP service lists
     local geo_v2fly_ip=$(get_setting awg_geo_v2fly_ip)
     if [ -n "$geo_v2fly_ip" ]; then
         for svc in $(echo "$geo_v2fly_ip" | tr ',' ' '); do
@@ -347,14 +405,12 @@ update_geo_if_needed(){
             [ -z "$svc" ] && continue
             if [ ! -f "$GEO_DIR/geoip/v2fly_${svc}.cidr" ] || [ ! -s "$GEO_DIR/geoip/v2fly_${svc}.cidr" ]; then
                 log_msg "Downloading missing GeoIP: $svc"
-                curl -sfL "${V2FLY_GEOIP_BASE}/${svc}.txt" -o "$GEO_DIR/geoip/v2fly_${svc}.cidr" 2>/dev/null
-                [ -f "$GEO_DIR/geoip/v2fly_${svc}.cidr" ] && grep -v ":" "$GEO_DIR/geoip/v2fly_${svc}.cidr" > "$GEO_DIR/geoip/v2fly_${svc}.tmp" && mv "$GEO_DIR/geoip/v2fly_${svc}.tmp" "$GEO_DIR/geoip/v2fly_${svc}.cidr"
+                download_geoip_service "$svc"
                 needed=true
             fi
         done
     fi
 
-    # Check v2fly domain database
     local geo_v2fly=$(get_setting awg_geo_v2fly)
     if [ -n "$geo_v2fly" ] && [ ! -f "$GEO_DIR/v2fly_all.yml" ]; then
         log_msg "Downloading missing v2fly domain database..."
@@ -370,30 +426,22 @@ update_geo_if_needed(){
     [ "$needed" = true ] && log_msg "Missing geo lists downloaded"
 }
 
-# --- Download all geo lists (Update Now — force refresh) ---
+# --- Download all geo lists (Update Now) ---
 
 update_geo_lists(){
     mkdir -p "$GEO_DIR/geoip" "$GEO_DIR/domains"
-
     log_msg "Updating geo lists..."
 
-    # GeoIP service lists from Loyalsoldier/geoip (Telegram, Google, etc.)
     local geo_v2fly_ip=$(get_setting awg_geo_v2fly_ip)
     if [ -n "$geo_v2fly_ip" ]; then
         for svc in $(echo "$geo_v2fly_ip" | tr ',' ' '); do
             svc=$(echo "$svc" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
             [ -z "$svc" ] && continue
             log_msg "Downloading GeoIP: $svc"
-            curl -sfL "${V2FLY_GEOIP_BASE}/${svc}.txt" -o "$GEO_DIR/geoip/v2fly_${svc}.cidr" 2>/dev/null
-            # Keep only IPv4
-            if [ -f "$GEO_DIR/geoip/v2fly_${svc}.cidr" ]; then
-                grep -v ":" "$GEO_DIR/geoip/v2fly_${svc}.cidr" > "$GEO_DIR/geoip/v2fly_${svc}.tmp"
-                mv "$GEO_DIR/geoip/v2fly_${svc}.tmp" "$GEO_DIR/geoip/v2fly_${svc}.cidr"
-            fi
+            download_geoip_service "$svc"
         done
     fi
 
-    # v2fly domain database (3MB, all domains)
     log_msg "Downloading v2fly domain database..."
     curl -sfL "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat_plain.yml" \
         -o "$GEO_DIR/v2fly_all.yml" 2>/dev/null
@@ -427,7 +475,7 @@ generate_config(){
     local h3=$(get_setting awg_h3)
     local h4=$(get_setting awg_h4)
 
-    # I1-I5 from base64-encoded setting (contains HTML-unsafe chars)
+    # I1-I5 from base64-encoded setting
     local i1="" i2="" i3="" i4="" i5=""
     local initdata=$(get_setting awg_initdata)
     if [ -n "$initdata" ]; then
@@ -482,7 +530,6 @@ generate_config(){
 
     chmod 600 "$CONF"
 
-    # Save address and DNS separately
     local address=$(get_setting awg_address)
     [ -n "$address" ] && echo "$address" > "$AWG_DIR/awg0.addr"
     local dns=$(get_setting awg_dns)
@@ -501,121 +548,115 @@ do_start(){
         return 0
     fi
 
-    # Generate config
-    generate_config || { update_status; return 1; }
-    [ ! -f "$CONF" ] && { log_msg "ERROR: No config"; update_status; return 1; }
-    [ ! -f "$AWG_GO" ] && { log_msg "ERROR: amneziawg-go not found"; update_status; return 1; }
+    acquire_lock
+
+    generate_config || { update_status; release_lock; return 1; }
+    [ ! -f "$CONF" ] && { log_msg "ERROR: No config"; update_status; release_lock; return 1; }
+    [ ! -f "$AWG_GO" ] && { log_msg "ERROR: amneziawg-go not found"; update_status; release_lock; return 1; }
 
     # Ensure TUN device exists
     mkdir -p /dev/net
     [ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200
     chmod 600 /dev/net/tun
 
-    # Start userspace daemon (creates TUN interface)
+    # Start userspace daemon
     mkdir -p /var/run/amneziawg
     "$AWG_GO" "$IFACE" >/dev/null 2>&1
     sleep 1
     if ! ip link show "$IFACE" >/dev/null 2>&1; then
         log_msg "ERROR: amneziawg-go failed to create interface"
-        update_status; return 1
+        update_status; release_lock; return 1
     fi
     log_msg "Userspace daemon started"
 
     # Configure interface
-    "$AWG_BIN" setconf "$IFACE" "$CONF" || { log_msg "ERROR: setconf failed"; ip link del "$IFACE" 2>/dev/null; update_status; return 1; }
+    "$AWG_BIN" setconf "$IFACE" "$CONF" || { log_msg "ERROR: setconf failed"; ip link del "$IFACE" 2>/dev/null; update_status; release_lock; return 1; }
 
     [ -f "$AWG_DIR/awg0.addr" ] && ip addr add "$(cat "$AWG_DIR/awg0.addr")" dev "$IFACE"
     ip link set "$IFACE" mtu 1280
     ip link set "$IFACE" up
 
-    # DNS: ensure queries go through dnsmasq for ipset population
+    # DNS: ensure queries go through dnsmasq
     if ! grep -q "^nameserver 127.0.0.1" /tmp/resolv.conf 2>/dev/null; then
         local old_dns=$(cat /tmp/resolv.conf 2>/dev/null)
         echo "nameserver 127.0.0.1" > /tmp/resolv.conf
         echo "$old_dns" >> /tmp/resolv.conf
     fi
 
-    # Routing table: split routes + LAN return + endpoint exclusion
-    local gw=$(ip route | grep "^default" | awk '{print $3}' | head -1)
-    local endpoint=$(grep "^Endpoint" "$CONF" | cut -d= -f2 | tr -d ' ' | cut -d: -f1)
+    # Routing table
+    local lan_net gw endpoint
+    lan_net=$(get_lan_net)
+    gw=$(ip route | awk '/^default/{print $3; exit}')
+    endpoint=$(get_endpoint)
     [ -n "$endpoint" ] && [ -n "$gw" ] && ip route add "$endpoint" via "$gw" 2>/dev/null
     ip route add 0.0.0.0/1 dev "$IFACE" table $RT_TABLE 2>/dev/null
     ip route add 128.0.0.0/1 dev "$IFACE" table $RT_TABLE 2>/dev/null
-    local lan_net
-    lan_net=$(get_lan_net)
     [ -n "$lan_net" ] && ip route add "$lan_net" dev br0 table $RT_TABLE 2>/dev/null
 
-    # Disable rp_filter for VPN interfaces
     disable_rp_filter
 
     # Base iptables
     iptables -I INPUT -i "$IFACE" -j ACCEPT
     iptables -I FORWARD -i "$IFACE" -j ACCEPT
     iptables -I FORWARD -o "$IFACE" -j ACCEPT
-    # MSS clamping — prevent TCP breakage due to tunnel MTU overhead
     iptables -t mangle -A FORWARD -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
     iptables -t mangle -A FORWARD -i "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
-    local masq_src
-    masq_src=$(get_lan_net)
-    if [ -n "$masq_src" ]; then
-        iptables -t nat -I POSTROUTING -s "$masq_src" -o "$IFACE" -j MASQUERADE
+    if [ -n "$lan_net" ]; then
+        iptables -t nat -I POSTROUTING -s "$lan_net" -o "$IFACE" -j MASQUERADE
     else
         iptables -t nat -I POSTROUTING -o "$IFACE" -j MASQUERADE
     fi
 
-    # Setup all routing/firewall rules
     setup_firewall
 
-    # Route for router-originated traffic through tunnel (after setup_firewall which cleans ip rules)
+    # Route for router-originated traffic (after setup_firewall which cleans ip rules)
     local awg_addr
     awg_addr=$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet /{sub(/\/.*/, "", $2); print $2; exit}')
     [ -n "$awg_addr" ] && ip rule add from "$awg_addr" lookup $RT_TABLE prio 100
 
-    # Watchdog: check tunnel every 5 minutes, restart if dead
+    # Watchdog
     cru a awg_watchdog "*/5 * * * * $ADDON_DIR/amneziawg.sh watchdog"
 
     log_msg "Started"
     update_status
+    release_lock
 }
 
 # --- Stop ---
 
 do_stop(){
-    # Remove iptables base rules
+    acquire_lock
+
     iptables -D INPUT -i "$IFACE" -j ACCEPT 2>/dev/null
     iptables -D FORWARD -i "$IFACE" -j ACCEPT 2>/dev/null
     iptables -D FORWARD -o "$IFACE" -j ACCEPT 2>/dev/null
-    # Remove MSS clamping
     iptables -t mangle -D FORWARD -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null
     iptables -t mangle -D FORWARD -i "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null
-    # Remove MASQUERADE (both restricted and unrestricted variants)
     local lan_net
     lan_net=$(get_lan_net)
     [ -n "$lan_net" ] && iptables -t nat -D POSTROUTING -s "$lan_net" -o "$IFACE" -j MASQUERADE 2>/dev/null
     iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null
 
-    # Cleanup firewall (flushes AWG chain atomically)
     cleanup_firewall
 
-    # Remove routes
     ip route flush table $RT_TABLE 2>/dev/null
-    local endpoint=$(grep "^Endpoint" "$CONF" 2>/dev/null | cut -d= -f2 | tr -d ' ' | cut -d: -f1)
+    local endpoint
+    endpoint=$(get_endpoint)
     [ -n "$endpoint" ] && ip route del "$endpoint" 2>/dev/null
 
-    # Remove interface and stop daemon
+    # Stop daemon
     ip link set "$IFACE" down 2>/dev/null
     ip link del "$IFACE" 2>/dev/null
-    # Kill userspace daemon if running
     local awg_pid
     awg_pid=$(pidof amneziawg-go 2>/dev/null)
     [ -n "$awg_pid" ] && kill "$awg_pid" 2>/dev/null
     rm -f /var/run/amneziawg/"$IFACE".sock
 
-    # Restart dnsmasq to clean up
     service restart_dnsmasq >/dev/null 2>&1
 
     log_msg "Stopped"
     update_status
+    release_lock
 }
 
 # --- Status JSON for web UI ---
@@ -630,11 +671,10 @@ update_status(){
 
     if is_running; then
         running=true
-        iface_addr=$(ip -4 addr show "$IFACE" 2>/dev/null | grep inet | awk '{print $2}')
+        iface_addr=$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet /{print $2; exit}')
         listen_port=$("$AWG_BIN" show "$IFACE" listen-port 2>/dev/null)
         pub_key=$("$AWG_BIN" show "$IFACE" public-key 2>/dev/null)
 
-        # Parse peers (avoid subshell variable loss)
         local dump=$("$AWG_BIN" show "$IFACE" dump 2>/dev/null | tail -n +2)
         if [ -n "$dump" ]; then
             local p_items=""
@@ -657,18 +697,16 @@ EOF
         fi
     fi
 
-    # Log
     log_text=$(dmesg 2>/dev/null | grep -i "amneziawg\|awg" | tail -10 | sed 's/"/\\"/g' | tr '\n' '|' | sed 's/|/\\n/g')
 
-    # Settings
     local default_policy=$(get_setting awg_default_policy)
     [ -z "$default_policy" ] && default_policy="direct"
     local clients_data=$(get_setting awg_clients | sed 's/"/\\"/g')
-    local active_rules=$(ip rule show 2>/dev/null | grep "lookup $RT_TABLE\|fwmark $FWMARK" | wc -l)
+    local active_rules=$(ip rule show 2>/dev/null | grep -c "lookup $RT_TABLE\|fwmark $FWMARK")
 
     local ipset_count=0
     ipset list "$IPSET_NAME" -t 2>/dev/null | grep -q "Number of entries" && \
-        ipset_count=$(ipset list "$IPSET_NAME" -t 2>/dev/null | grep "Number of entries" | awk '{print $NF}')
+        ipset_count=$(ipset list "$IPSET_NAME" -t 2>/dev/null | awk '/Number of entries/{print $NF}')
 
     local geo_domains=0
     [ -f "$DNSMASQ_AWG_CONF" ] && geo_domains=$(grep -c "^ipset=" "$DNSMASQ_AWG_CONF" 2>/dev/null)
@@ -695,26 +733,18 @@ do_install_page(){
     [ "$am_webui_page" = "none" ] && { log_msg "ERROR: No page slot"; return 1; }
 
     cp "$ADDON_DIR/amneziawg_page.asp" "/www/user/$am_webui_page"
-
-    [ ! -f /tmp/menuTree.js ] && cp /www/require/modules/menuTree.js /tmp/
-    sed -i '/AmneziaWG/d' /tmp/menuTree.js
-    sed -i "/url: \"Advanced_VPN_OpenVPN.asp\"/a {url: \"$am_webui_page\", tabName: \"AmneziaWG\"}," /tmp/menuTree.js
-    umount /www/require/modules/menuTree.js 2>/dev/null
-    mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js
+    mount_menu_tree "$am_webui_page"
 
     echo '{"running":false,"peers":[],"log":"Installed."}' > "$STATUS_FILE"
 
-    # service-event handler
     [ ! -f /jffs/scripts/service-event ] && echo "#!/bin/sh" > /jffs/scripts/service-event && chmod +x /jffs/scripts/service-event
     if ! grep -q "amneziawg" /jffs/scripts/service-event; then
         echo 'echo "$2" | grep -q "^awg" && /jffs/addons/amneziawg/amneziawg.sh "service_event" "$1" "$2"' >> /jffs/scripts/service-event
     fi
 
-    # Boot mount
     [ ! -f /jffs/scripts/services-start ] && echo "#!/bin/sh" > /jffs/scripts/services-start && chmod +x /jffs/scripts/services-start
     grep -q "amneziawg" /jffs/scripts/services-start || echo "/jffs/addons/amneziawg/amneziawg.sh mount_ui &" >> /jffs/scripts/services-start
 
-    # Restore v2fly categories if available
     [ -f "$GEO_DIR/v2fly_categories.txt" ] && cp "$GEO_DIR/v2fly_categories.txt" /www/user/v2fly_categories.htm 2>/dev/null
 
     log_msg "Page installed: $am_webui_page"
@@ -726,19 +756,12 @@ do_mount_ui(){
     am_get_webui_page "$ADDON_DIR/amneziawg_page.asp"
     if [ "$am_webui_page" != "none" ]; then
         cp "$ADDON_DIR/amneziawg_page.asp" "/www/user/$am_webui_page"
-        [ ! -f /tmp/menuTree.js ] && cp /www/require/modules/menuTree.js /tmp/
-        sed -i '/AmneziaWG/d' /tmp/menuTree.js
-        sed -i "/url: \"Advanced_VPN_OpenVPN.asp\"/a {url: \"$am_webui_page\", tabName: \"AmneziaWG\"}," /tmp/menuTree.js
-        umount /www/require/modules/menuTree.js 2>/dev/null
-        mount -o bind /tmp/menuTree.js /www/require/modules/menuTree.js
+        mount_menu_tree "$am_webui_page"
     fi
 
-    # Restore v2fly categories
     [ -f "$GEO_DIR/v2fly_categories.txt" ] && cp "$GEO_DIR/v2fly_categories.txt" /www/user/v2fly_categories.htm 2>/dev/null
-
     update_status
 
-    # Auto-start
     if [ "$(get_setting awg_autostart)" = "1" ]; then
         sleep 10
         do_start
@@ -769,7 +792,9 @@ do_uninstall(){
 # --- Watchdog (called by cron every 5 min) ---
 
 do_watchdog(){
-    # Check if interface exists
+    # Skip if lock held (another operation in progress)
+    [ -f "$LOCKFILE" ] && return 0
+
     if ! ip link show "$IFACE" >/dev/null 2>&1; then
         log_msg "WATCHDOG: interface $IFACE missing, restarting"
         do_stop 2>/dev/null
@@ -778,7 +803,6 @@ do_watchdog(){
         return
     fi
 
-    # Check if daemon is alive
     if ! pidof amneziawg-go >/dev/null 2>&1; then
         log_msg "WATCHDOG: amneziawg-go process dead, restarting"
         do_stop 2>/dev/null
@@ -787,7 +811,6 @@ do_watchdog(){
         return
     fi
 
-    # Check if tunnel passes traffic (ping test)
     if ! ping -c 1 -W 5 -I "$IFACE" 8.8.8.8 >/dev/null 2>&1; then
         log_msg "WATCHDOG: tunnel not passing traffic, restarting"
         do_stop 2>/dev/null
