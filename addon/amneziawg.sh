@@ -4,7 +4,7 @@
 # Userspace amneziawg-go, per-device policy routing, GeoIP/GeoSite
 # =============================================================
 
-AWG_VERSION="1.1.1"
+AWG_VERSION="1.1.2"
 ADDON_DIR="/jffs/addons/amneziawg"
 AWG_DIR="/opt/amneziawg"
 CONF="$AWG_DIR/awg0.conf"
@@ -544,6 +544,9 @@ generate_config(){
 # --- Start ---
 
 do_start(){
+    # Skip if update in progress (opkg triggers S99amneziawg start)
+    [ -f /tmp/.awg_no_autostart ] && { log_msg "Start blocked: update in progress"; return 0; }
+
     if is_running; then
         log_msg "Already running"
         update_status
@@ -865,8 +868,14 @@ do_update(){
 
     do_stop 2>/dev/null
     wait_for "! pidof amneziawg-go >/dev/null 2>&1" 10
+    # Block auto-start during opkg install (S99amneziawg is triggered by opkg)
+    touch /tmp/.awg_no_autostart
     opkg install "$tmp"
     rm -f "$tmp"
+    # Stop VPN if opkg's init script started it
+    do_stop 2>/dev/null
+    wait_for "! pidof amneziawg-go >/dev/null 2>&1" 10
+    rm -f /tmp/.awg_no_autostart
     # Install page from new version
     /jffs/addons/amneziawg/amneziawg.sh install_page
     log_msg "Update complete. Start VPN from UI."
