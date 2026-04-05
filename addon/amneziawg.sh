@@ -4,7 +4,7 @@
 # Userspace amneziawg-go, per-device policy routing, GeoIP/GeoSite
 # =============================================================
 
-AWG_VERSION="1.1.4"
+AWG_VERSION="1.1.5"
 ADDON_DIR="/jffs/addons/amneziawg"
 AWG_DIR="/opt/amneziawg"
 CONF="$AWG_DIR/awg0.conf"
@@ -663,10 +663,16 @@ do_stop(){
     ip link del "$IFACE" 2>/dev/null
     local awg_pid
     awg_pid=$(pidof amneziawg-go 2>/dev/null)
-    [ -n "$awg_pid" ] && kill "$awg_pid" 2>/dev/null
+    if [ -n "$awg_pid" ]; then
+        kill "$awg_pid" 2>/dev/null
+        wait_for "! pidof amneziawg-go >/dev/null 2>&1" 5
+        # Force kill if still alive (crashed/stuck process)
+        pidof amneziawg-go >/dev/null 2>&1 && kill -9 "$(pidof amneziawg-go)" 2>/dev/null
+    fi
     rm -f /var/run/amneziawg/"$IFACE".sock
 
-    service restart_dnsmasq >/dev/null 2>&1
+    service restart_dnsmasq >/dev/null 2>&1 &
+    wait_for "nslookup localhost 127.0.0.1 >/dev/null 2>&1" 10
 
     log_msg "Stopped"
     update_status

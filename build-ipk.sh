@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 PKG_NAME="amneziawg"
-PKG_VERSION="1.1.4-1"
+PKG_VERSION="1.1.5-1"
 
 build_ipk(){
     local arch="$1"
@@ -160,10 +160,10 @@ echo ""
 # Build aarch64 (ARM64) — GT-AX11000, RT-AX86U, RT-AX88U, etc.
 build_ipk "aarch64-3.10" "output/amneziawg-go" "output/awg" || true
 
-# Build arm (ARM32) — RT-AC86U (384.x), RT-AC68U, etc.
-build_ipk "armv7-2.6" "output/amneziawg-go-arm" "output/awg-arm" || true
+# Build arm (ARM32, GOARM=6 soft-float) — RT-AC68U, RT-AC66U, older ARM routers
+build_ipk "armv7-2.6" "output/amneziawg-go-arm6" "output/awg-arm" || true
 
-# Build arm (ARM32, newer Entware) — RT-AX56U, RT-AX58U, etc.
+# Build arm (ARM32, newer Entware/HND) — RT-AX56U, RT-AX58U, etc.
 build_ipk "armv7-3.2" "output/amneziawg-go-arm" "output/awg-arm" || true
 
 echo ""
