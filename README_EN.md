@@ -142,13 +142,25 @@ Requires devices to use the router as DNS server. For iPhones: **Settings > Wi-F
 ```shell
 git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go.git
 cd amneziawg-go
+
+# ARM64 (aarch64-3.10) — GT-AX11000, RT-AX86U, RT-AX88U
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../output/amneziawg-go
+
+# ARM32 (armv7-2.6) — RT-AC68U, RT-AC66U, older ARM routers
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 go build -ldflags="-s -w" -o ../output/amneziawg-go-arm5
+
+# ARM32 (armv7-3.2) — RT-AX56U, RT-AX58U, newer HND routers
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o ../output/amneziawg-go-arm
 ```
 
 ### Build awg CLI tool (via Docker)
 
 ```shell
+# ARM64 (aarch64) — main Dockerfile
 ./build.sh
+
+# ARM32 (static musl, works on both armv7-2.6 and armv7-3.2)
+DOCKER_BUILDKIT=1 docker build -f Dockerfile.arm32 --output=output .
 ```
 
 ### Build .ipk package

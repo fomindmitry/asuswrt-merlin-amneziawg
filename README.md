@@ -148,13 +148,25 @@ youtube,google,discord,netflix,spotify,instagram
 ```shell
 git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go.git
 cd amneziawg-go
+
+# ARM64 (aarch64-3.10) — GT-AX11000, RT-AX86U, RT-AX88U
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../output/amneziawg-go
+
+# ARM32 (armv7-2.6) — RT-AC68U, RT-AC66U, старые ARM-роутеры
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=5 go build -ldflags="-s -w" -o ../output/amneziawg-go-arm5
+
+# ARM32 (armv7-3.2) — RT-AX56U, RT-AX58U, новые HND-роутеры
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags="-s -w" -o ../output/amneziawg-go-arm
 ```
 
 ### Сборка awg CLI (через Docker)
 
 ```shell
+# ARM64 (aarch64) — через основной Dockerfile
 ./build.sh
+
+# ARM32 (static musl, для обоих armv7-2.6 и armv7-3.2)
+DOCKER_BUILDKIT=1 docker build -f Dockerfile.arm32 --output=output .
 ```
 
 ### Сборка .ipk пакетов
@@ -164,8 +176,9 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o ../output/amn
 ```
 
 Результат:
-- `output/amneziawg_1.0.0-1_aarch64-3.10.ipk` -- ARM64 роутеры
-- `output/amneziawg_1.0.0-1_armv7-2.6.ipk` -- ARM32 роутеры
+- `output/amneziawg_*_aarch64-3.10.ipk` -- ARM64 роутеры (GT-AX11000, RT-AX86U, RT-AX88U)
+- `output/amneziawg_*_armv7-2.6.ipk` -- ARM32 старые роутеры (RT-AC68U, RT-AC66U)
+- `output/amneziawg_*_armv7-3.2.ipk` -- ARM32 новые HND-роутеры (RT-AX56U, RT-AX58U)
 
 ## Управление через CLI
 
