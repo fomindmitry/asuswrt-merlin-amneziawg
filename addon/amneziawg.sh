@@ -198,6 +198,20 @@ setup_dns_interception(){
     log_msg "DNS interception enabled"
 }
 
+setup_ipv6_block(){
+    local ipv6_svc
+    ipv6_svc=$(nvram get ipv6_service 2>/dev/null)
+    [ "$ipv6_svc" = "disabled" ] || [ -z "$ipv6_svc" ] && return 0
+    ip6tables -I FORWARD -i br0 -o "$IFACE" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null
+    ip6tables -I FORWARD -i "$IFACE" -o br0 -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null
+    log_msg "IPv6 leak protection enabled"
+}
+
+cleanup_ipv6_block(){
+    ip6tables -D FORWARD -i br0 -o "$IFACE" -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null
+    ip6tables -D FORWARD -i "$IFACE" -o br0 -j REJECT --reject-with icmp6-adm-prohibited 2>/dev/null
+}
+
 cleanup_firewall(){
     # Unhook from PREROUTING, flush and delete custom chain
     iptables -t mangle -D PREROUTING -j "$AWG_CHAIN" 2>/dev/null
@@ -232,6 +246,8 @@ cleanup_firewall(){
     # Remove cron
     cru d awg_geo_update 2>/dev/null
     cru d awg_watchdog 2>/dev/null
+
+    cleanup_ipv6_block
 
     log_msg "Firewall rules cleaned"
 }
@@ -711,6 +727,7 @@ do_start(){
     iptables -I INPUT -i "$IFACE" -j ACCEPT
     iptables -I FORWARD -i "$IFACE" -j ACCEPT
     iptables -I FORWARD -o "$IFACE" -j ACCEPT
+    setup_ipv6_block
     iptables -t mangle -A FORWARD -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
     iptables -t mangle -A FORWARD -i "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
     if [ -n "$lan_net" ]; then
@@ -742,6 +759,7 @@ do_stop(){
     iptables -D INPUT -i "$IFACE" -j ACCEPT 2>/dev/null
     iptables -D FORWARD -i "$IFACE" -j ACCEPT 2>/dev/null
     iptables -D FORWARD -o "$IFACE" -j ACCEPT 2>/dev/null
+    cleanup_ipv6_block
     iptables -t mangle -D FORWARD -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null
     iptables -t mangle -D FORWARD -i "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null
     local lan_net
