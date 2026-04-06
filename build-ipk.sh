@@ -57,18 +57,21 @@ EOF
 
     cat > "$CONTROL_DIR/postinst" << 'POSTEOF'
 #!/bin/sh
-chmod +x /opt/amneziawg/amneziawg-go
-chmod +x /opt/amneziawg/awg
+set -e
+for file in /opt/amneziawg/amneziawg-go /opt/amneziawg/awg; do
+    [ -f "$file" ] || { echo "ERROR: $file not found"; exit 1; }
+    chmod +x "$file"
+done
 chmod +x /opt/etc/init.d/S99amneziawg
 chmod +x /jffs/addons/amneziawg/amneziawg.sh
 ln -sf /opt/amneziawg/awg /opt/bin/awg
 mkdir -p /opt/amneziawg/geo/geoip /opt/amneziawg/geo/domains
-mkdir -p /var/run/amneziawg
+mkdir -p -m 700 /var/run/amneziawg
 mkdir -p /dev/net
-[ ! -c /dev/net/tun ] && mknod /dev/net/tun c 10 200
-chmod 600 /dev/net/tun
+mknod -m 600 /dev/net/tun c 10 200 2>/dev/null || true
+chmod 600 /dev/net/tun 2>/dev/null || true
 if [ -f /usr/sbin/helper.sh ]; then
-    /jffs/addons/amneziawg/amneziawg.sh install_page
+    /jffs/addons/amneziawg/amneziawg.sh install_page || true
 fi
 echo ""
 echo "============================================"
@@ -82,9 +85,12 @@ POSTEOF
 
     cat > "$CONTROL_DIR/prerm" << 'PRERMEOF'
 #!/bin/sh
-[ -f /jffs/addons/amneziawg/amneziawg.sh ] && /jffs/addons/amneziawg/amneziawg.sh stop 2>/dev/null
-[ -f /jffs/addons/amneziawg/amneziawg.sh ] && /jffs/addons/amneziawg/amneziawg.sh uninstall 2>/dev/null
+if [ -f /jffs/addons/amneziawg/amneziawg.sh ]; then
+    /jffs/addons/amneziawg/amneziawg.sh stop 2>/dev/null || true
+    /jffs/addons/amneziawg/amneziawg.sh uninstall 2>/dev/null || true
+fi
 rm -f /opt/bin/awg
+rm -rf /opt/amneziawg
 exit 0
 PRERMEOF
     chmod 755 "$CONTROL_DIR/prerm"
@@ -160,8 +166,8 @@ echo ""
 # Build aarch64 (ARM64) — GT-AX11000, RT-AX86U, RT-AX88U, etc.
 build_ipk "aarch64-3.10" "output/amneziawg-go" "output/awg" || true
 
-# Build arm (ARM32, GOARM=6 soft-float) — RT-AC68U, RT-AC66U, older ARM routers
-build_ipk "armv7-2.6" "output/amneziawg-go-arm6" "output/awg-arm" || true
+# Build arm (ARM32, GOARM=5) — RT-AC68U, RT-AC66U, older ARM routers
+build_ipk "armv7-2.6" "output/amneziawg-go-arm5" "output/awg-arm" || true
 
 # Build arm (ARM32, newer Entware/HND) — RT-AX56U, RT-AX58U, etc.
 build_ipk "armv7-3.2" "output/amneziawg-go-arm" "output/awg-arm" || true
