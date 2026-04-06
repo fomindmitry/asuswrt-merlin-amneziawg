@@ -24,6 +24,7 @@ RT_TABLE=300
 AWG_CHAIN="AWG"
 LOCKDIR="/tmp/.awg_lock"
 V2FLY_GEOIP_BASE="https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text"
+GEOIP_SERVICES="telegram google facebook twitter netflix cloudflare apple amazon microsoft github openai stripe fastly akamai oracle bing cloudfront digitalocean discord dropbox hetzner linode linkedin meta pinterest reddit signal slack snapchat spotify steam tiktok twitch uber vultr whatsapp yahoo yandex zoom"
 
 # --- Helpers ---
 
@@ -161,8 +162,46 @@ download_geoip_service(){
     local svc="$1"
     svc=$(echo "$svc" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
     [ -z "$svc" ] && return 1
-    curl -sfL "${V2FLY_GEOIP_BASE}/${svc}.txt" 2>/dev/null | grep -v ":" > "$GEO_DIR/geoip/v2fly_${svc}.cidr"
+    { curl -sfL "${V2FLY_GEOIP_BASE}/${svc}.txt" 2>/dev/null || curl -sfLk "${V2FLY_GEOIP_BASE}/${svc}.txt" 2>/dev/null; } | grep -v ":" > "$GEO_DIR/geoip/v2fly_${svc}.cidr"
     [ -s "$GEO_DIR/geoip/v2fly_${svc}.cidr" ] || { rm -f "$GEO_DIR/geoip/v2fly_${svc}.cidr"; return 1; }
+}
+
+# Download all geo databases (called at install and update)
+download_all_geo(){
+    mkdir -p "$GEO_DIR/geoip" "$GEO_DIR/domains"
+    log_msg "Downloading all geo databases..."
+
+    # Download all GeoIP service CIDR lists
+    local count=0
+    for svc in $GEOIP_SERVICES; do
+        download_geoip_service "$svc" && count=$((count + 1))
+    done
+    log_msg "GeoIP: $count service lists downloaded"
+
+    # Download v2fly domain database
+    log_msg "Downloading v2fly domain database..."
+    local tmp_yml="$GEO_DIR/v2fly_all.yml.tmp"
+    if curl -sfL "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat_plain.yml" \
+        -o "$tmp_yml" 2>/dev/null || \
+       curl -sfLk "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat_plain.yml" \
+        -o "$tmp_yml" 2>/dev/null; then
+        if [ -s "$tmp_yml" ]; then
+            mv "$tmp_yml" "$GEO_DIR/v2fly_all.yml"
+            grep '  - name: ' "$GEO_DIR/v2fly_all.yml" | sed 's/.*- name: //' | sort > "$GEO_DIR/v2fly_categories.txt"
+            cp "$GEO_DIR/v2fly_categories.txt" /www/user/v2fly_categories.htm 2>/dev/null
+            log_msg "GeoSite: $(wc -l < "$GEO_DIR/v2fly_categories.txt") categories downloaded"
+        else
+            rm -f "$tmp_yml"
+            log_msg "WARNING: v2fly domain download empty"
+        fi
+    else
+        rm -f "$tmp_yml"
+        log_msg "WARNING: v2fly domain download failed"
+    fi
+
+    # Save timestamp
+    date +%s > "$GEO_DIR/.last_update"
+    log_msg "Geo databases updated"
 }
 
 # Mount AmneziaWG tab into Merlin menu
@@ -494,68 +533,17 @@ save_clients(){
     fi
 }
 
-# --- Download only missing geo lists (on Apply) ---
-
+# Check if geo databases exist locally, download if missing
 update_geo_if_needed(){
-    mkdir -p "$GEO_DIR/geoip" "$GEO_DIR/domains"
-    local needed=false
-
-    local geo_v2fly_ip=$(get_setting awg_geo_v2fly_ip)
-    if [ -n "$geo_v2fly_ip" ]; then
-        for svc in $(echo "$geo_v2fly_ip" | tr ',' ' '); do
-            svc=$(echo "$svc" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
-            [ -z "$svc" ] && continue
-            if [ ! -f "$GEO_DIR/geoip/v2fly_${svc}.cidr" ] || [ ! -s "$GEO_DIR/geoip/v2fly_${svc}.cidr" ]; then
-                log_msg "Downloading missing GeoIP: $svc"
-                download_geoip_service "$svc"
-                needed=true
-            fi
-        done
+    if [ ! -d "$GEO_DIR/geoip" ] || [ -z "$(ls "$GEO_DIR/geoip/"*.cidr 2>/dev/null)" ]; then
+        log_msg "Geo databases not found, downloading..."
+        download_all_geo
     fi
-
-    local geo_v2fly=$(get_setting awg_geo_v2fly)
-    if [ -n "$geo_v2fly" ] && [ ! -f "$GEO_DIR/v2fly_all.yml" ]; then
-        log_msg "Downloading missing v2fly domain database..."
-        curl -sfL "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat_plain.yml" \
-            -o "$GEO_DIR/v2fly_all.yml" 2>/dev/null
-        if [ -f "$GEO_DIR/v2fly_all.yml" ] && [ -s "$GEO_DIR/v2fly_all.yml" ]; then
-            grep '  - name: ' "$GEO_DIR/v2fly_all.yml" | sed 's/.*- name: //' | sort > "$GEO_DIR/v2fly_categories.txt"
-            cp "$GEO_DIR/v2fly_categories.txt" /www/user/v2fly_categories.htm 2>/dev/null
-        fi
-        needed=true
-    fi
-
-    [ "$needed" = true ] && log_msg "Missing geo lists downloaded"
 }
 
-# --- Download all geo lists (Update Now) ---
-
+# Force re-download all geo databases
 update_geo_lists(){
-    mkdir -p "$GEO_DIR/geoip" "$GEO_DIR/domains"
-    log_msg "Updating geo lists..."
-
-    local geo_v2fly_ip=$(get_setting awg_geo_v2fly_ip)
-    if [ -n "$geo_v2fly_ip" ]; then
-        for svc in $(echo "$geo_v2fly_ip" | tr ',' ' '); do
-            svc=$(echo "$svc" | tr -d ' ' | tr '[:upper:]' '[:lower:]')
-            [ -z "$svc" ] && continue
-            log_msg "Downloading GeoIP: $svc"
-            download_geoip_service "$svc"
-        done
-    fi
-
-    log_msg "Downloading v2fly domain database..."
-    curl -sfL "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat_plain.yml" \
-        -o "$GEO_DIR/v2fly_all.yml" 2>/dev/null
-    if [ -f "$GEO_DIR/v2fly_all.yml" ] && [ -s "$GEO_DIR/v2fly_all.yml" ]; then
-        grep '  - name: ' "$GEO_DIR/v2fly_all.yml" | sed 's/.*- name: //' | sort > "$GEO_DIR/v2fly_categories.txt"
-        cp "$GEO_DIR/v2fly_categories.txt" /www/user/v2fly_categories.htm 2>/dev/null
-        log_msg "v2fly domains: $(wc -l < "$GEO_DIR/v2fly_categories.txt") categories"
-    else
-        log_msg "WARNING: v2fly domain download failed"
-    fi
-
-    log_msg "Geo lists updated"
+    download_all_geo
 }
 
 # --- Validation helpers ---
@@ -1164,5 +1152,6 @@ case "$1" in
     service_event)  do_service_event "$2" "$3" ;;
     wan_event)      do_wan_event "$2" "$3" ;;
     firewall_restart) do_firewall_restart ;;
-    *)              echo "Usage: $0 {start|stop|restart|status|update_geo|install_page|uninstall}" ;;
+    download_geo)   download_all_geo ;;
+    *)              echo "Usage: $0 {start|stop|restart|status|update_geo|download_geo|install_page|uninstall}" ;;
 esac
