@@ -51,6 +51,13 @@ get_endpoint(){
     awk -F'[ =:]+' '/^Endpoint/{print $2}' "$CONF" 2>/dev/null
 }
 
+flush_conntrack(){
+    if conntrack -D --mark "$FWMARK"/"$FWMARK" 2>/dev/null; then
+        return 0
+    fi
+    conntrack -F 2>/dev/null
+}
+
 save_and_set_rp_filter(){
     for iface in all awg0 br0; do
         local f="/proc/sys/net/ipv4/conf/$iface/rp_filter"
@@ -450,7 +457,7 @@ setup_firewall(){
     fi
 
     # --- Always flush conntrack so devices reconnect through VPN ---
-    conntrack -F 2>/dev/null
+    flush_conntrack
 
     # --- Setup cron ---
     if [ "$(get_setting awg_geo_autoupdate)" = "1" ]; then
