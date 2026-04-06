@@ -99,7 +99,7 @@
 var custom_settings = <% get_custom_settings(); %>;
 var statusTimer = null;
 var v2flyList = [];
-var v2flyIpList = ['telegram','google','facebook','twitter','netflix','cloudflare','apple','amazon','microsoft','github','openai','stripe','fastly','akamai','oracle','bing','cloudfront','digitalocean','discord','dropbox','github','hetzner','linode','linkedin','meta','pinterest','reddit','signal','slack','snapchat','spotify','steam','tiktok','twitch','uber','vultr','whatsapp','yahoo','yandex','zoom'];
+var v2flyIpList = ['telegram','google','facebook','twitter','netflix','cloudflare','fastly','cloudfront'];
 function escHtml(s){
     return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }

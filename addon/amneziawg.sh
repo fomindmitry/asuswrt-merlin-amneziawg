@@ -24,7 +24,7 @@ RT_TABLE=300
 AWG_CHAIN="AWG"
 LOCKDIR="/tmp/.awg_lock"
 V2FLY_GEOIP_BASE="https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text"
-GEOIP_SERVICES="telegram google facebook twitter netflix cloudflare apple amazon microsoft github openai stripe fastly akamai oracle bing cloudfront digitalocean discord dropbox hetzner linode linkedin meta pinterest reddit signal slack snapchat spotify steam tiktok twitch uber vultr whatsapp yahoo yandex zoom"
+GEOIP_SERVICES="telegram google facebook twitter netflix cloudflare fastly cloudfront"
 
 # --- Helpers ---
 
@@ -172,19 +172,25 @@ download_all_geo(){
     log_msg "Downloading all geo databases..."
 
     # Download all GeoIP service CIDR lists
-    local count=0 total=0
+    local count=0 total=0 ok=0
     for svc in $GEOIP_SERVICES; do
         total=$((total + 1))
     done
     for svc in $GEOIP_SERVICES; do
         count=$((count + 1))
         log_msg "GeoIP: downloading $svc ($count/$total)..."
-        download_geoip_service "$svc" || log_msg "WARNING: GeoIP $svc failed"
+        if download_geoip_service "$svc"; then
+            ok=$((ok + 1))
+        else
+            log_msg "WARNING: GeoIP $svc failed"
+        fi
+        update_status
     done
-    log_msg "GeoIP: $count/$total service lists done"
+    log_msg "GeoIP: $ok/$total service lists downloaded"
 
     # Download v2fly domain database
     log_msg "Downloading v2fly domain database..."
+    update_status
     local tmp_yml="$GEO_DIR/v2fly_all.yml.tmp"
     if curl -sfL "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat_plain.yml" \
         -o "$tmp_yml" 2>/dev/null || \
@@ -206,6 +212,7 @@ download_all_geo(){
 
     # Save timestamp
     date +%s > "$GEO_DIR/.last_update"
+    update_status
     log_msg "Geo databases updated"
 }
 
