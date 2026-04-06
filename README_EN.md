@@ -45,7 +45,7 @@ Other aarch64 Merlin routers should also work.
 - [Asuswrt-Merlin firmware](https://www.asuswrt-merlin.net/download) (`384.15` or later, `3006.x`)
 - [Entware](https://github.com/Entware/Entware/wiki/Install-on-Asus-stock-firmware) installed (use [amtm](https://diversion.ch/amtm.html) to install)
 - SSH access to the router
-- AmneziaWG server (self-hosted)
+- AmneziaWG server (self-hosted) -- for quick server setup: [amneziawg-installer](https://github.com/bivlked/amneziawg-installer)
 
 ## Installation
 

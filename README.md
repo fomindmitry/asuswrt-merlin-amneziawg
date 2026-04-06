@@ -51,7 +51,7 @@ VPN-клиент с обходом DPI-блокировок на базе [Amnez
 - [Прошивка Asuswrt-Merlin](https://www.asuswrt-merlin.net/download) (`384.15` и новее, `3006.x`)
 - Установленный [Entware](https://github.com/Entware/Entware/wiki/Install-on-Asus-stock-firmware) (ставится через [amtm](https://diversion.ch/amtm.html))
 - SSH-доступ к роутеру
-- AmneziaWG-сервер (self-hosted)
+- AmneziaWG-сервер (self-hosted) -- для быстрой установки сервера: [amneziawg-installer](https://github.com/bivlked/amneziawg-installer)
 
 ## Установка
 
