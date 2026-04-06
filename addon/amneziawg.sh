@@ -513,6 +513,40 @@ update_geo_lists(){
     log_msg "Geo lists updated"
 }
 
+# --- Validation helpers ---
+
+validate_wgkey(){
+    echo "$1" | grep -qE '^[A-Za-z0-9+/]{42}[AEIMQUYcgkosw048]=$' && return 0
+    log_msg "ERROR: Invalid WireGuard key"
+    return 1
+}
+
+validate_endpoint(){
+    local host port
+    port="${1##*:}"
+    host="${1%:*}"
+    echo "$port" | grep -qE '^[0-9]+$' || { log_msg "ERROR: Invalid endpoint port: $1"; return 1; }
+    [ "$port" -ge 1 ] && [ "$port" -le 65535 ] 2>/dev/null || { log_msg "ERROR: Endpoint port out of range: $port"; return 1; }
+    [ -n "$host" ] || { log_msg "ERROR: Empty endpoint host"; return 1; }
+    return 0
+}
+
+validate_port(){
+    echo "$1" | grep -qE '^[0-9]+$' || return 1
+    [ "$1" -ge 1 ] && [ "$1" -le 65535 ] 2>/dev/null || return 1
+    return 0
+}
+
+validate_uint(){
+    echo "$1" | grep -qE '^[0-9]+$' || return 1
+    return 0
+}
+
+validate_ip(){
+    echo "$1" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$' || return 1
+    return 0
+}
+
 # --- Generate awg0.conf ---
 
 generate_config(){
@@ -555,6 +589,11 @@ generate_config(){
         log_msg "ERROR: Missing required config"
         return 1
     fi
+    validate_wgkey "$privkey" || return 1
+    validate_wgkey "$peer_pubkey" || return 1
+    [ -n "$peer_psk" ] && { validate_wgkey "$peer_psk" || return 1; }
+    validate_endpoint "$peer_endpoint" || return 1
+    [ -n "$listenport" ] && { validate_port "$listenport" || { log_msg "ERROR: Invalid listen port: $listenport"; return 1; }; }
 
     {
         echo "[Interface]"
