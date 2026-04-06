@@ -226,8 +226,8 @@ cleanup_firewall(){
     iptables -t mangle -X "$AWG_CHAIN" 2>/dev/null
 
     # Remove all ip rules for our table/fwmark
-    while ip rule del lookup $RT_TABLE 2>/dev/null; do :; done
-    while ip rule del fwmark "$FWMARK" 2>/dev/null; do :; done
+    local _i=0; while [ $_i -lt 100 ] && ip rule del lookup $RT_TABLE 2>/dev/null; do _i=$((_i+1)); done
+    _i=0; while [ $_i -lt 100 ] && ip rule del fwmark "$FWMARK" 2>/dev/null; do _i=$((_i+1)); done
 
     # Remove DNS interception rules
     local router_ip
