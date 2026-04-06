@@ -885,6 +885,18 @@ do_install_page(){
         echo 'echo "$2" | grep -q "^awg" && /jffs/addons/amneziawg/amneziawg.sh "service_event" "$1" "$2"' >> /jffs/scripts/service-event
     fi
 
+    # WAN event hook
+    [ ! -f /jffs/scripts/wan-event ] && echo "#!/bin/sh" > /jffs/scripts/wan-event && chmod +x /jffs/scripts/wan-event
+    if ! grep -q "amneziawg" /jffs/scripts/wan-event; then
+        echo '/jffs/addons/amneziawg/amneziawg.sh wan_event "$1" "$2"  # AmneziaWG' >> /jffs/scripts/wan-event
+    fi
+
+    # Firewall restart hook
+    [ ! -f /jffs/scripts/firewall-start ] && echo "#!/bin/sh" > /jffs/scripts/firewall-start && chmod +x /jffs/scripts/firewall-start
+    if ! grep -q "amneziawg" /jffs/scripts/firewall-start; then
+        echo '/jffs/addons/amneziawg/amneziawg.sh firewall_restart  # AmneziaWG' >> /jffs/scripts/firewall-start
+    fi
+
     [ ! -f /jffs/scripts/services-start ] && echo "#!/bin/sh" > /jffs/scripts/services-start && chmod +x /jffs/scripts/services-start
     grep -q "amneziawg" /jffs/scripts/services-start || echo "/jffs/addons/amneziawg/amneziawg.sh mount_ui &" >> /jffs/scripts/services-start
 
@@ -920,6 +932,8 @@ do_uninstall(){
 
     [ -f /jffs/scripts/service-event ] && sed -i '/amneziawg/d' /jffs/scripts/service-event
     [ -f /jffs/scripts/services-start ] && sed -i '/amneziawg/d' /jffs/scripts/services-start
+    [ -f /jffs/scripts/wan-event ] && sed -i '/amneziawg/d' /jffs/scripts/wan-event
+    [ -f /jffs/scripts/firewall-start ] && sed -i '/amneziawg/d' /jffs/scripts/firewall-start
 
     local page=$(ls /www/user/ 2>/dev/null | while read f; do grep -l "AmneziaWG" "/www/user/$f" 2>/dev/null; done | head -1)
     [ -n "$page" ] && rm -f "$page"
@@ -1023,6 +1037,45 @@ do_update(){
     update_status
 }
 
+do_wan_event(){
+    local wan_if="$1" wan_state="$2"
+    [ "$wan_state" != "connected" ] && return 0
+    if is_running; then
+        log_msg "WAN event: $wan_state on $wan_if, updating endpoint route"
+        local gw endpoint
+        gw=$(ip route | awk '/^default/{print $3; exit}')
+        endpoint=$(get_endpoint)
+        if [ -n "$endpoint" ] && [ -n "$gw" ]; then
+            ip route del "$endpoint" 2>/dev/null
+            ip route add "$endpoint" via "$gw" 2>/dev/null
+            log_msg "Endpoint route updated: $endpoint via $gw"
+        fi
+    fi
+}
+
+do_firewall_restart(){
+    if is_running; then
+        log_msg "Firewall restart detected, re-applying rules"
+        iptables -I INPUT -i "$IFACE" -j ACCEPT
+        iptables -I FORWARD -i "$IFACE" -j ACCEPT
+        iptables -I FORWARD -o "$IFACE" -j ACCEPT
+        iptables -t mangle -A FORWARD -o "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+        iptables -t mangle -A FORWARD -i "$IFACE" -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu
+        local lan_net
+        lan_net=$(get_lan_net)
+        if [ -n "$lan_net" ]; then
+            iptables -t nat -I POSTROUTING -s "$lan_net" -o "$IFACE" -j MASQUERADE
+        else
+            iptables -t nat -I POSTROUTING -o "$IFACE" -j MASQUERADE
+        fi
+        setup_ipv6_block
+        setup_firewall
+        local awg_addr
+        awg_addr=$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet /{sub(/\/.*/, "", $2); print $2; exit}')
+        [ -n "$awg_addr" ] && ip rule add from "$awg_addr" lookup $RT_TABLE prio 100
+    fi
+}
+
 # --- Service event dispatcher ---
 
 do_service_event(){
@@ -1068,5 +1121,7 @@ case "$1" in
     mount_ui)       do_mount_ui ;;
     uninstall)      do_uninstall ;;
     service_event)  do_service_event "$2" "$3" ;;
+    wan_event)      do_wan_event "$2" "$3" ;;
+    firewall_restart) do_firewall_restart ;;
     *)              echo "Usage: $0 {start|stop|restart|status|update_geo|install_page|uninstall}" ;;
 esac
