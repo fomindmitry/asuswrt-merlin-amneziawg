@@ -183,6 +183,21 @@ ipset_load_file(){
 
 # --- Unified firewall setup ---
 
+setup_dns_interception(){
+    local router_ip
+    router_ip=$(get_router_ip)
+    [ -z "$router_ip" ] && router_ip="192.168.1.1"
+    iptables -t nat -I PREROUTING -i br0 -p udp --dport 53 -j DNAT --to "$router_ip"
+    iptables -t nat -I PREROUTING -i br0 -p tcp --dport 53 -j DNAT --to "$router_ip"
+    iptables -I FORWARD -i br0 -p tcp --dport 853 -j REJECT
+    local doh_ip
+    for doh_ip in 8.8.8.8 8.8.4.4 1.1.1.1 1.0.0.1 9.9.9.9 149.112.112.112; do
+        iptables -I FORWARD -i br0 -d "$doh_ip" -p tcp --dport 443 -j REJECT
+        iptables -I FORWARD -i br0 -d "$doh_ip" -p udp --dport 443 -j REJECT
+    done
+    log_msg "DNS interception enabled"
+}
+
 cleanup_firewall(){
     # Unhook from PREROUTING, flush and delete custom chain
     iptables -t mangle -D PREROUTING -j "$AWG_CHAIN" 2>/dev/null
@@ -396,20 +411,9 @@ setup_firewall(){
     # --- Single fwmark rule for all marked traffic ---
     ip rule add fwmark "$FWMARK" lookup $RT_TABLE prio 98
 
-    # --- Force DNS through dnsmasq (defeat DoH/DoT on devices) ---
-    if [ "$has_geo" = true ]; then
-        local router_ip
-        router_ip=$(get_router_ip)
-        [ -z "$router_ip" ] && router_ip="192.168.1.1"
-        iptables -t nat -I PREROUTING -i br0 -p udp --dport 53 -j DNAT --to "$router_ip"
-        iptables -t nat -I PREROUTING -i br0 -p tcp --dport 53 -j DNAT --to "$router_ip"
-        iptables -I FORWARD -i br0 -p tcp --dport 853 -j REJECT
-        local doh_ip
-        for doh_ip in 8.8.8.8 8.8.4.4 1.1.1.1 1.0.0.1 9.9.9.9 149.112.112.112; do
-            iptables -I FORWARD -i br0 -d "$doh_ip" -p tcp --dport 443 -j REJECT
-            iptables -I FORWARD -i br0 -d "$doh_ip" -p udp --dport 443 -j REJECT
-        done
-        log_msg "DNS interception enabled"
+    # --- Force DNS through dnsmasq whenever VPN is active ---
+    if [ "$default_policy" != "direct" ] || [ "$has_geo" = true ]; then
+        setup_dns_interception
     fi
 
     # --- Restart dnsmasq if geo active ---
