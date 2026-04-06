@@ -73,8 +73,6 @@ chmod 600 /dev/net/tun 2>/dev/null || true
 if [ -f /usr/sbin/helper.sh ]; then
     /jffs/addons/amneziawg/amneziawg.sh install_page || true
 fi
-# Download geo databases in background (non-blocking)
-/jffs/addons/amneziawg/amneziawg.sh download_geo &
 echo ""
 echo "============================================"
 echo "  AmneziaWG installed!"

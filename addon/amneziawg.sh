@@ -172,11 +172,16 @@ download_all_geo(){
     log_msg "Downloading all geo databases..."
 
     # Download all GeoIP service CIDR lists
-    local count=0
+    local count=0 total=0
     for svc in $GEOIP_SERVICES; do
-        download_geoip_service "$svc" && count=$((count + 1))
+        total=$((total + 1))
     done
-    log_msg "GeoIP: $count service lists downloaded"
+    for svc in $GEOIP_SERVICES; do
+        count=$((count + 1))
+        log_msg "GeoIP: downloading $svc ($count/$total)..."
+        download_geoip_service "$svc" || log_msg "WARNING: GeoIP $svc failed"
+    done
+    log_msg "GeoIP: $count/$total service lists done"
 
     # Download v2fly domain database
     log_msg "Downloading v2fly domain database..."
