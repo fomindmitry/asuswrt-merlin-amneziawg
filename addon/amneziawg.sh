@@ -4,7 +4,7 @@
 # Userspace amneziawg-go, per-device policy routing, GeoIP/GeoSite
 # =============================================================
 
-AWG_VERSION="1.1.5"
+AWG_VERSION="1.1.6"
 ADDON_DIR="/jffs/addons/amneziawg"
 AWG_DIR="/opt/amneziawg"
 CONF="$AWG_DIR/awg0.conf"
@@ -724,9 +724,10 @@ do_start(){
 
     # Start userspace daemon
     mkdir -p /var/run/amneziawg
-    "$AWG_GO" "$IFACE" >/dev/null 2>&1
-    if ! wait_for_iface "$IFACE" 5; then
+    "$AWG_GO" "$IFACE" > /tmp/awg_daemon.log 2>&1 &
+    if ! wait_for_iface "$IFACE" 10; then
         log_msg "ERROR: amneziawg-go failed to create interface"
+        [ -f /tmp/awg_daemon.log ] && log_msg "Daemon output: $(cat /tmp/awg_daemon.log)"
         update_status; release_lock; return 1
     fi
     log_msg "Userspace daemon started"
@@ -889,7 +890,7 @@ do_install_page(){
     nvram get rc_support | grep -q am_addons || { log_msg "ERROR: Addons not supported"; return 1; }
 
     mkdir -p "$ADDON_DIR"
-    cp "$0" "$ADDON_DIR/amneziawg.sh"
+    [ "$(readlink -f "$0")" != "$(readlink -f "$ADDON_DIR/amneziawg.sh")" ] && cp "$0" "$ADDON_DIR/amneziawg.sh"
     chmod +x "$ADDON_DIR/amneziawg.sh"
 
     [ -f "/tmp/amneziawg_page.asp" ] && cp /tmp/amneziawg_page.asp "$ADDON_DIR/amneziawg_page.asp"
@@ -1006,6 +1007,7 @@ check_update(){
     local repo="r0otx/asuswrt-merlin-amneziawg"
     local latest
     latest=$(curl -sfL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"v//;s/".*//')
+    [ -z "$latest" ] && latest=$(curl -sfLk "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null | grep '"tag_name"' | head -1 | sed 's/.*"v//;s/".*//')
     if [ -z "$latest" ]; then
         echo "{\"current\":\"$AWG_VERSION\",\"latest\":\"\",\"update\":false,\"error\":\"Cannot reach GitHub\"}"
         return
@@ -1031,6 +1033,7 @@ do_update(){
 
     local release_json
     release_json=$(curl -sfL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null)
+    [ -z "$release_json" ] && release_json=$(curl -sfLk "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null)
     local ipk_url
     ipk_url=$(echo "$release_json" | grep '"browser_download_url"' | grep "$pkg_arch" | grep '.ipk"' | head -1 | sed 's/.*"browser_download_url"[[:space:]]*:[[:space:]]*"//;s/".*//')
     if [ -z "$ipk_url" ]; then
@@ -1043,7 +1046,7 @@ do_update(){
     fi
 
     local tmp="/tmp/amneziawg_update.ipk"
-    if ! curl -sfL "$ipk_url" -o "$tmp"; then
+    if ! curl -sfL "$ipk_url" -o "$tmp" && ! curl -sfLk "$ipk_url" -o "$tmp"; then
         log_msg "ERROR: Download failed"
         return 1
     fi

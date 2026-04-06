@@ -42,11 +42,20 @@ echo "Architecture: $PKG_ARCH"
 
 # Get latest release URL
 echo "Fetching latest release..."
-RELEASE_JSON=$(curl -sfL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null)
+RELEASE_JSON=$(curl -sfL "https://api.github.com/repos/${REPO}/releases/latest" 2>/tmp/awg_curl_err)
 if [ -z "$RELEASE_JSON" ]; then
     echo "ERROR: Cannot reach GitHub API"
-    exit 1
+    [ -f /tmp/awg_curl_err ] && echo "curl error: $(cat /tmp/awg_curl_err)"
+    echo "Retrying with --insecure (CA bundle may be outdated)..."
+    RELEASE_JSON=$(curl -sfLk "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null)
+    if [ -z "$RELEASE_JSON" ]; then
+        echo "ERROR: Cannot reach GitHub API even with --insecure"
+        echo "Check DNS and internet connectivity: ping github.com"
+        rm -f /tmp/awg_curl_err
+        exit 1
+    fi
 fi
+rm -f /tmp/awg_curl_err
 
 VERSION=$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"//' | sed 's/".*//')
 # Validate version string
@@ -80,7 +89,7 @@ echo "Package: $IPK_FILE"
 TMP_DIR=$(mktemp -d /tmp/amneziawg_install.XXXXXX) || { echo "ERROR: Cannot create temp directory"; exit 1; }
 trap 'rm -rf "$TMP_DIR"' EXIT INT TERM
 echo "Downloading..."
-if ! curl -sfL "$IPK_URL" -o "$TMP_DIR/$IPK_FILE"; then
+if ! curl -sfL "$IPK_URL" -o "$TMP_DIR/$IPK_FILE" && ! curl -sfLk "$IPK_URL" -o "$TMP_DIR/$IPK_FILE"; then
     echo "ERROR: Download failed"
     rm -rf "$TMP_DIR"
     exit 1

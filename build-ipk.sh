@@ -10,7 +10,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
 PKG_NAME="amneziawg"
-PKG_VERSION="1.1.5-1"
+PKG_VERSION="1.1.6-1"
 
 build_ipk(){
     local arch="$1"
@@ -95,9 +95,7 @@ exit 0
 PRERMEOF
     chmod 755 "$CONTROL_DIR/prerm"
 
-    cat > "$CONTROL_DIR/conffiles" << 'CONFEOF'
-/opt/amneziawg/awg0.conf
-CONFEOF
+    : > "$CONTROL_DIR/conffiles"
 
     cd "$CONTROL_DIR"
     gtar czf "$WORK_DIR/control.tar.gz" --format=gnu ./control ./postinst ./prerm ./conffiles
