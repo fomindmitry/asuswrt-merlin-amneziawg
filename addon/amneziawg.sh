@@ -671,9 +671,9 @@ generate_config(){
     [ -n "$peer_psk" ] && { validate_wgkey "$peer_psk" || return 1; }
     validate_endpoint "$peer_endpoint" || return 1
     [ -n "$listenport" ] && { validate_port "$listenport" || { log_msg "ERROR: Invalid listen port: $listenport"; return 1; }; }
-    [ -n "$jc" ] && { validate_uint "$jc" || { log_msg "ERROR: Invalid Jc: $jc"; return 1; }; }
-    [ -n "$jmin" ] && { validate_uint "$jmin" || { log_msg "ERROR: Invalid Jmin: $jmin"; return 1; }; }
-    [ -n "$jmax" ] && { validate_uint "$jmax" || { log_msg "ERROR: Invalid Jmax: $jmax"; return 1; }; }
+    [ -n "$jc" ] && { validate_int "$jc" || { log_msg "ERROR: Invalid Jc: $jc"; return 1; }; }
+    [ -n "$jmin" ] && { validate_int "$jmin" || { log_msg "ERROR: Invalid Jmin: $jmin"; return 1; }; }
+    [ -n "$jmax" ] && { validate_int "$jmax" || { log_msg "ERROR: Invalid Jmax: $jmax"; return 1; }; }
     [ -n "$s1" ] && { validate_int "$s1" || { log_msg "ERROR: Invalid S1: $s1"; return 1; }; }
     [ -n "$s2" ] && { validate_int "$s2" || { log_msg "ERROR: Invalid S2: $s2"; return 1; }; }
     [ -n "$s3" ] && { validate_int "$s3" || { log_msg "ERROR: Invalid S3: $s3"; return 1; }; }
