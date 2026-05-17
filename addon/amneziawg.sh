@@ -390,20 +390,27 @@ setup_firewall(){
     [ -z "$default_policy" ] && default_policy="direct"
     local has_geo=false
 
+    log_msg "Configuring firewall and routing..."
+
     # --- Create ipset ---
     ipset create "$IPSET_NAME" hash:net family inet hashsize 4096 maxelem 131072 timeout 86400 2>/dev/null
     if ! ipset list "$IPSET_NAME" >/dev/null 2>&1; then
         log_msg "ERROR: ipset $IPSET_NAME creation failed, geo routing disabled"
         has_geo=false
+    else
+        log_msg "ipset $IPSET_NAME created"
     fi
 
     # --- Load GeoIP subnets into ipset (bulk) ---
     local ip_count=0
-    for f in "$GEO_DIR"/geoip/*.cidr; do
-        [ ! -f "$f" ] && continue
-        ipset_load_file "$f" "$IPSET_NAME"
-        ip_count=$((ip_count + $(wc -l < "$f")))
-    done
+    if [ -d "$GEO_DIR/geoip" ]; then
+        log_msg "Loading GeoIP databases from $GEO_DIR/geoip..."
+        for f in "$GEO_DIR"/geoip/*.cidr; do
+            [ ! -f "$f" ] && continue
+            ipset_load_file "$f" "$IPSET_NAME"
+            ip_count=$((ip_count + $(wc -l < "$f")))
+        done
+    fi
 
     # Check ipset fill level
     local ipset_entries
@@ -422,11 +429,13 @@ setup_firewall(){
     # --- Save custom domains/IPs ---
     local custom_domains=$(get_setting awg_geo_custom_domains)
     if [ -n "$custom_domains" ]; then
+        log_msg "Adding custom domains..."
         mkdir -p "$GEO_DIR/domains"
         echo "$custom_domains" | tr ',' '\n' > "$GEO_DIR/domains/custom.txt"
     fi
     local custom_ips=$(get_setting awg_geo_custom_ips)
     if [ -n "$custom_ips" ]; then
+        log_msg "Adding custom IPs to ipset..."
         mkdir -p "$GEO_DIR/geoip"
         echo "$custom_ips" | tr ',' '\n' | while read -r cidr; do
             cidr=$(echo "$cidr" | tr -d ' \r')
@@ -464,6 +473,7 @@ setup_firewall(){
     # --- Per-device rules (two passes for correct ordering) ---
     save_clients
     if [ -f "$CLIENTS_FILE" ] && [ -s "$CLIENTS_FILE" ]; then
+        log_msg "Applying per-device routing policies..."
 
         # Pass 1: "direct" exclusions (RETURN rules must come before MARK rules)
         while IFS=',' read -r dev_id name policy mac || [ -n "$dev_id" ]; do
@@ -555,10 +565,12 @@ setup_firewall(){
 
     # --- Restart dnsmasq if geo active ---
     if [ $domain_count -gt 0 ] || [ "$has_geo" = true ]; then
+        log_msg "Restarting dnsmasq with new domain rules..."
         service restart_dnsmasq >/dev/null 2>&1
         wait_for_dns 10
         # Pre-resolve domains to populate ipset
         if [ -f "$DNSMASQ_AWG_CONF" ]; then
+            log_msg "Pre-resolving domains to populate ipset..."
             local bg_count=0
             awk -F/ '/^ipset=/{for(i=2;i<NF;i++)print $i}' "$DNSMASQ_AWG_CONF" | while read -r domain; do
                 [ -z "$domain" ] && continue
@@ -775,6 +787,8 @@ do_start(){
         return 0
     fi
 
+    log_msg "Starting AmneziaWG..."
+
     # Wait for network to be ready (br0 up with IP), important on boot
     if ! ip -4 addr show br0 2>/dev/null | grep -q "inet "; then
         log_msg "Waiting for network (br0)..."
@@ -785,11 +799,12 @@ do_start(){
         fi
     fi
 
-    acquire_lock || { log_msg "Cannot acquire lock, aborting start"; update_status; return 1; }
+    acquire_lock || { log_msg "ERROR: Cannot acquire lock, aborting start"; update_status; return 1; }
 
-    generate_config || { update_status; release_lock; return 1; }
-    [ ! -f "$CONF" ] && { log_msg "ERROR: No config"; update_status; release_lock; return 1; }
-    [ ! -f "$AWG_GO" ] && { log_msg "ERROR: amneziawg-go not found"; update_status; release_lock; return 1; }
+    log_msg "Generating configuration..."
+    generate_config || { log_msg "ERROR: Configuration generation failed"; update_status; release_lock; return 1; }
+    [ ! -f "$CONF" ] && { log_msg "ERROR: No config file found at $CONF"; update_status; release_lock; return 1; }
+    [ ! -f "$AWG_GO" ] && { log_msg "ERROR: amneziawg-go not found at $AWG_GO"; update_status; release_lock; return 1; }
 
     # Ensure TUN device exists
     modprobe tun 2>/dev/null
@@ -799,34 +814,49 @@ do_start(){
 
     # Start userspace daemon
     mkdir -p /var/run/amneziawg
+    log_msg "Starting amneziawg-go daemon for $IFACE..."
     "$AWG_GO" "$IFACE" > /tmp/awg_daemon.log 2>&1 &
     if ! wait_for_iface "$IFACE" 10; then
-        log_msg "ERROR: amneziawg-go failed to create interface"
+        log_msg "ERROR: amneziawg-go failed to create interface $IFACE"
         [ -f /tmp/awg_daemon.log ] && log_msg "Daemon output: $(cat /tmp/awg_daemon.log)"
         update_status; release_lock; return 1
     fi
     log_msg "Userspace daemon started"
 
     # Configure interface
-    "$AWG_BIN" setconf "$IFACE" "$CONF" || { log_msg "ERROR: setconf failed"; ip link del "$IFACE" 2>/dev/null; update_status; release_lock; return 1; }
+    log_msg "Applying configuration to $IFACE..."
+    "$AWG_BIN" setconf "$IFACE" "$CONF" || { log_msg "ERROR: awg setconf failed"; ip link del "$IFACE" 2>/dev/null; update_status; release_lock; return 1; }
 
-    [ -f "$AWG_DIR/awg0.addr" ] && ip addr add "$(cat "$AWG_DIR/awg0.addr")" dev "$IFACE"
+    if [ -f "$AWG_DIR/awg0.addr" ]; then
+        local addr=$(cat "$AWG_DIR/awg0.addr")
+        log_msg "Assigning IP $addr to $IFACE"
+        ip addr add "$addr" dev "$IFACE"
+    fi
     ip link set "$IFACE" mtu 1280
     ip link set "$IFACE" up
+    log_msg "Interface $IFACE is up"
 
     # Routing table
+    log_msg "Configuring routing table $RT_TABLE..."
     local lan_net gw endpoint
     lan_net=$(get_lan_net)
     gw=$(ip route | awk '/^default/{print $3; exit}')
     endpoint=$(get_endpoint)
-    [ -n "$endpoint" ] && [ -n "$gw" ] && ip route add "$endpoint" via "$gw" 2>/dev/null
+    if [ -n "$endpoint" ] && [ -n "$gw" ]; then
+        log_msg "Adding route to endpoint $endpoint via $gw"
+        ip route add "$endpoint" via "$gw" 2>/dev/null
+    fi
     ip route add 0.0.0.0/1 dev "$IFACE" table $RT_TABLE 2>/dev/null
     ip route add 128.0.0.0/1 dev "$IFACE" table $RT_TABLE 2>/dev/null
-    [ -n "$lan_net" ] && ip route add "$lan_net" dev br0 table $RT_TABLE 2>/dev/null
+    if [ -n "$lan_net" ]; then
+        log_msg "Adding LAN route $lan_net to table $RT_TABLE"
+        ip route add "$lan_net" dev br0 table $RT_TABLE 2>/dev/null
+    fi
 
     save_and_set_rp_filter
 
     # Base iptables
+    log_msg "Setting up base firewall rules..."
     iptables -I INPUT -i "$IFACE" -j ACCEPT
     iptables -I FORWARD -i "$IFACE" -j ACCEPT
     iptables -I FORWARD -o "$IFACE" -j ACCEPT
@@ -839,16 +869,21 @@ do_start(){
         iptables -t nat -I POSTROUTING -o "$IFACE" -j MASQUERADE
     fi
 
+    log_msg "Running policy routing setup..."
     setup_firewall "$keep_cron"
 
     # Route for router-originated traffic (after setup_firewall which cleans ip rules)
     local awg_addr
     awg_addr=$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet /{sub(/\/.*/, "", $2); print $2; exit}')
-    [ -n "$awg_addr" ] && ip rule add from "$awg_addr" lookup $RT_TABLE prio 100
+    if [ -n "$awg_addr" ]; then
+        log_msg "Adding router-originated traffic rule for $awg_addr"
+        ip rule add from "$awg_addr" lookup $RT_TABLE prio 100
+    fi
 
     # Watchdog
     if [ "$keep_cron" != "keep_cron" ]; then
         cru a awg_watchdog "*/5 * * * * '$ADDON_DIR/amneziawg.sh' watchdog"
+        log_msg "Watchdog scheduled"
     fi
 
     log_msg "Started, verifying tunnel connectivity..."
@@ -863,6 +898,7 @@ do_start(){
             break
         fi
         hc_try=$((hc_try + 1))
+        [ $((hc_try % 10)) -eq 0 ] && log_msg "Connection check try $hc_try/30..."
         sleep 2
     done
     if [ "$hc_ok" = true ]; then
@@ -871,7 +907,7 @@ do_start(){
     else
         log_msg "ERROR: Tunnel not passing traffic after 60s, rolling back to prevent lockout"
         do_stop "keep_cron" "no_lock" 2>/dev/null
-        log_msg "VPN stopped automatically. Check server config and endpoint reachability."
+        log_msg "WARNING: VPN stopped automatically. Check server config and endpoint reachability."
         update_status
     fi
     release_lock
@@ -883,9 +919,12 @@ do_stop(){
     local keep_cron="$1"
     local no_lock="$2"
     if [ "$no_lock" != "no_lock" ]; then
-        acquire_lock || { log_msg "Cannot acquire lock, aborting stop"; return 1; }
+        acquire_lock || { log_msg "ERROR: Cannot acquire lock, aborting stop"; return 1; }
     fi
 
+    log_msg "Stopping AmneziaWG..."
+
+    log_msg "Cleaning up base firewall rules..."
     iptables -D INPUT -i "$IFACE" -j ACCEPT 2>/dev/null
     iptables -D FORWARD -i "$IFACE" -j ACCEPT 2>/dev/null
     iptables -D FORWARD -o "$IFACE" -j ACCEPT 2>/dev/null
@@ -897,33 +936,45 @@ do_stop(){
     [ -n "$lan_net" ] && iptables -t nat -D POSTROUTING -s "$lan_net" -o "$IFACE" -j MASQUERADE 2>/dev/null
     iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null
 
+    log_msg "Cleaning up policy routing..."
     cleanup_firewall
 
     if [ "$keep_cron" != "keep_cron" ]; then
+        log_msg "Removing cron jobs..."
         cru d awg_geo_update 2>/dev/null
         cru d awg_watchdog 2>/dev/null
     fi
 
+    log_msg "Flushing routing table $RT_TABLE..."
     ip route flush table $RT_TABLE 2>/dev/null
     local endpoint
     endpoint=$(get_endpoint)
-    [ -n "$endpoint" ] && ip route del "$endpoint" 2>/dev/null
+    if [ -n "$endpoint" ]; then
+        log_msg "Removing endpoint route to $endpoint"
+        ip route del "$endpoint" 2>/dev/null
+    fi
 
     restore_rp_filter
 
     # Stop daemon
+    log_msg "Tearing down interface $IFACE..."
     ip link set "$IFACE" down 2>/dev/null
     ip link del "$IFACE" 2>/dev/null
     local awg_pid
     awg_pid=$(pidof amneziawg-go 2>/dev/null)
     if [ -n "$awg_pid" ]; then
+        log_msg "Killing amneziawg-go daemon (PID $awg_pid)..."
         kill "$awg_pid" 2>/dev/null
         wait_for_pid_exit amneziawg-go 5
         # Force kill if still alive (crashed/stuck process)
-        pidof amneziawg-go >/dev/null 2>&1 && kill -9 "$(pidof amneziawg-go)" 2>/dev/null
+        if pidof amneziawg-go >/dev/null 2>&1; then
+            log_msg "WARNING: amneziawg-go still alive, force killing..."
+            kill -9 "$(pidof amneziawg-go)" 2>/dev/null
+        fi
     fi
     rm -f /var/run/amneziawg/"$IFACE".sock
 
+    log_msg "Restarting dnsmasq..."
     service restart_dnsmasq >/dev/null 2>&1 &
     wait_for_dns 10
 
