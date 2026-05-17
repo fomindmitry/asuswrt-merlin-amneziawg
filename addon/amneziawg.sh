@@ -309,16 +309,13 @@ cleanup_firewall(){
     rm -f "$DNSMASQ_AWG_CONF"
     [ -f "$DNSMASQ_INCLUDE" ] && sed -i "\|${DNSMASQ_AWG_CONF}|d" "$DNSMASQ_INCLUDE"
 
-    # Remove cron
-    cru d awg_geo_update 2>/dev/null
-    cru d awg_watchdog 2>/dev/null
-
     cleanup_ipv6_block
 
     log_msg "Firewall rules cleaned"
 }
 
 setup_firewall(){
+    local keep_cron="${1:-init_cron}"
     cleanup_firewall
 
     local default_policy=$(get_setting awg_default_policy)
@@ -537,8 +534,10 @@ setup_firewall(){
     flush_conntrack
 
     # --- Setup cron ---
-    if [ "$(get_setting awg_geo_autoupdate)" = "1" ]; then
-        cru a awg_geo_update "0 4 * * * '$ADDON_DIR/amneziawg.sh' update_geo"
+    if [ "$keep_cron" != "keep_cron" ]; then
+        if [ "$(get_setting awg_geo_autoupdate)" = "1" ]; then
+            cru a awg_geo_update "0 4 * * * '$ADDON_DIR/amneziawg.sh' update_geo"
+        fi
     fi
 
     log_msg "Firewall configured: $ip_count IPs, $domain_count domains"
@@ -703,6 +702,7 @@ generate_config(){
 # --- Start ---
 
 do_start(){
+    local keep_cron="${1:-init_cron}"
     # Skip if update in progress (opkg triggers S99amneziawg start)
     [ -f /tmp/.awg_no_autostart ] && { log_msg "Start blocked: update in progress"; return 0; }
 
@@ -776,7 +776,7 @@ do_start(){
         iptables -t nat -I POSTROUTING -o "$IFACE" -j MASQUERADE
     fi
 
-    setup_firewall
+    setup_firewall "$keep_cron"
 
     # Route for router-originated traffic (after setup_firewall which cleans ip rules)
     local awg_addr
@@ -784,11 +784,12 @@ do_start(){
     [ -n "$awg_addr" ] && ip rule add from "$awg_addr" lookup $RT_TABLE prio 100
 
     # Watchdog
-    cru a awg_watchdog "*/5 * * * * '$ADDON_DIR/amneziawg.sh' watchdog"
+    if [ "$keep_cron" != "keep_cron" ]; then
+        cru a awg_watchdog "*/5 * * * * '$ADDON_DIR/amneziawg.sh' watchdog"
+    fi
 
     log_msg "Started, verifying tunnel connectivity..."
     update_status
-    release_lock
 
     # Health check: verify tunnel passes traffic, rollback if not
     local hc_ok=false
@@ -806,16 +807,21 @@ do_start(){
         update_status
     else
         log_msg "ERROR: Tunnel not passing traffic after 60s, rolling back to prevent lockout"
-        do_stop 2>/dev/null
+        do_stop "keep_cron" "no_lock" 2>/dev/null
         log_msg "VPN stopped automatically. Check server config and endpoint reachability."
         update_status
     fi
+    release_lock
 }
 
 # --- Stop ---
 
 do_stop(){
-    acquire_lock || { log_msg "Cannot acquire lock, aborting stop"; return 1; }
+    local keep_cron="$1"
+    local no_lock="$2"
+    if [ "$no_lock" != "no_lock" ]; then
+        acquire_lock || { log_msg "Cannot acquire lock, aborting stop"; return 1; }
+    fi
 
     iptables -D INPUT -i "$IFACE" -j ACCEPT 2>/dev/null
     iptables -D FORWARD -i "$IFACE" -j ACCEPT 2>/dev/null
@@ -829,6 +835,11 @@ do_stop(){
     iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null
 
     cleanup_firewall
+
+    if [ "$keep_cron" != "keep_cron" ]; then
+        cru d awg_geo_update 2>/dev/null
+        cru d awg_watchdog 2>/dev/null
+    fi
 
     ip route flush table $RT_TABLE 2>/dev/null
     local endpoint
@@ -855,7 +866,9 @@ do_stop(){
 
     log_msg "Stopped"
     update_status
-    release_lock
+    if [ "$no_lock" != "no_lock" ]; then
+        release_lock
+    fi
 }
 
 # --- Status JSON for web UI ---
@@ -1031,9 +1044,9 @@ do_watchdog(){
 
     if [ -n "$reason" ]; then
         log_msg "WATCHDOG: $reason, restarting"
-        do_stop 2>/dev/null
+        do_stop "keep_cron" 2>/dev/null
         wait_for_pid_exit amneziawg-go 10
-        do_start
+        do_start "keep_cron"
     fi
 }
 
@@ -1144,7 +1157,7 @@ do_firewall_restart(){
             iptables -t nat -I POSTROUTING -o "$IFACE" -j MASQUERADE
         fi
         setup_ipv6_block
-        setup_firewall
+        setup_firewall "keep_cron"
         local awg_addr
         awg_addr=$(ip -4 addr show "$IFACE" 2>/dev/null | awk '/inet /{sub(/\/.*/, "", $2); print $2; exit}')
         [ -n "$awg_addr" ] && ip rule add from "$awg_addr" lookup $RT_TABLE prio 100
@@ -1158,7 +1171,7 @@ do_service_event(){
     case "$event" in
         awgstart)       do_start ;;
         awgstop)        do_stop ;;
-        awgrestart)     do_stop; wait_for_pid_exit amneziawg-go 10; do_start ;;
+        awgrestart)     do_stop "keep_cron"; wait_for_pid_exit amneziawg-go 10; do_start "keep_cron" ;;
         awgsaveconf)
             local _wt=0; while [ $_wt -lt 5 ] && [ -z "$(get_setting awg_privatekey)" ]; do sleep 1; _wt=$((_wt+1)); done
             generate_config
@@ -1198,7 +1211,7 @@ do_service_event(){
 case "$1" in
     start)          do_start ;;
     stop)           do_stop ;;
-    restart)        do_stop; wait_for_pid_exit amneziawg-go 10; do_start ;;
+    restart)        do_stop "keep_cron"; wait_for_pid_exit amneziawg-go 10; do_start "keep_cron" ;;
     status)         update_status ;;
     update_geo)     update_geo_lists; is_running && setup_firewall; update_status ;;
     check_update)   check_update ;;
