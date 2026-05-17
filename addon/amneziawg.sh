@@ -595,19 +595,28 @@ validate_port(){
 
 validate_uint() {
     local input="$1"
-    local UINT32_MAX=4294967295
+    echo "$input" | grep -qE '^[0-9]+$' || return 1
+    [ "$input" -le 4294967295 ] 2>/dev/null || return 1
+    return 0
+}
 
+validate_int() {
+    local input="$1"
+    echo "$input" | grep -qE '^-?[0-9]+$' || return 1
+    [ "$input" -ge -2147483648 ] 2>/dev/null && [ "$input" -le 2147483647 ] 2>/dev/null || return 1
+    return 0
+}
+
+validate_uint_range() {
+    local input="$1"
     if echo "$input" | grep -qE '^[0-9]+-[0-9]+$'; then
         local lower="${input%-*}"
         local upper="${input#*-}"
-        [ "$lower" -le "$upper" ]         || return 1
-        [ "$upper" -le "$UINT32_MAX" ]    || return 1
+        [ "$lower" -le "$upper" ] 2>/dev/null || return 1
+        [ "$upper" -le 4294967295 ] 2>/dev/null || return 1
         return 0
     fi
-
-    echo "$input" | grep -qE '^[0-9]+$'  || return 1
-    [ "$input" -le "$UINT32_MAX" ]        || return 1
-    return 0
+    validate_uint "$input"
 }
 
 validate_ip(){
@@ -665,12 +674,14 @@ generate_config(){
     [ -n "$jc" ] && { validate_uint "$jc" || { log_msg "ERROR: Invalid Jc: $jc"; return 1; }; }
     [ -n "$jmin" ] && { validate_uint "$jmin" || { log_msg "ERROR: Invalid Jmin: $jmin"; return 1; }; }
     [ -n "$jmax" ] && { validate_uint "$jmax" || { log_msg "ERROR: Invalid Jmax: $jmax"; return 1; }; }
-    [ -n "$s1" ] && { validate_uint "$s1" || { log_msg "ERROR: Invalid S1: $s1"; return 1; }; }
-    [ -n "$s2" ] && { validate_uint "$s2" || { log_msg "ERROR: Invalid S2: $s2"; return 1; }; }
-    [ -n "$h1" ] && { validate_uint "$h1" || { log_msg "ERROR: Invalid H1: $h1"; return 1; }; }
-    [ -n "$h2" ] && { validate_uint "$h2" || { log_msg "ERROR: Invalid H2: $h2"; return 1; }; }
-    [ -n "$h3" ] && { validate_uint "$h3" || { log_msg "ERROR: Invalid H3: $h3"; return 1; }; }
-    [ -n "$h4" ] && { validate_uint "$h4" || { log_msg "ERROR: Invalid H4: $h4"; return 1; }; }
+    [ -n "$s1" ] && { validate_int "$s1" || { log_msg "ERROR: Invalid S1: $s1"; return 1; }; }
+    [ -n "$s2" ] && { validate_int "$s2" || { log_msg "ERROR: Invalid S2: $s2"; return 1; }; }
+    [ -n "$s3" ] && { validate_int "$s3" || { log_msg "ERROR: Invalid S3: $s3"; return 1; }; }
+    [ -n "$s4" ] && { validate_int "$s4" || { log_msg "ERROR: Invalid S4: $s4"; return 1; }; }
+    [ -n "$h1" ] && { validate_uint_range "$h1" || { log_msg "ERROR: Invalid H1: $h1"; return 1; }; }
+    [ -n "$h2" ] && { validate_uint_range "$h2" || { log_msg "ERROR: Invalid H2: $h2"; return 1; }; }
+    [ -n "$h3" ] && { validate_uint_range "$h3" || { log_msg "ERROR: Invalid H3: $h3"; return 1; }; }
+    [ -n "$h4" ] && { validate_uint_range "$h4" || { log_msg "ERROR: Invalid H4: $h4"; return 1; }; }
 
     {
         echo "[Interface]"

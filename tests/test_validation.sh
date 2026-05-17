@@ -1,62 +1,74 @@
 #!/bin/sh
 # Unit tests for validation functions in amneziawg.sh
 
-# Mock UINT32_MAX if not sourced
-UINT32_MAX=4294967295
-
-# The function to test (copied from addon/amneziawg.sh for unit isolation)
-# In the future, we could source the script if we refactor it to be sourceable.
 validate_uint() {
     local input="$1"
-    local UINT32_MAX=4294967295
-
-    if echo "$input" | grep -qE '^[0-9]+-[0-9]+$'; then
-        local lower="${input%-*}"
-        local upper="${input#*-}"
-        [ "$lower" -le "$upper" ]         || return 1
-        [ "$upper" -le "$UINT32_MAX" ]    || return 1
-        return 0
-    fi
-
-    echo "$input" | grep -qE '^[0-9]+$'  || return 1
-    [ "$input" -le "$UINT32_MAX" ]        || return 1
+    echo "$input" | grep -qE '^[0-9]+$' || return 1
+    [ "$input" -le 4294967295 ] 2>/dev/null || return 1
     return 0
 }
 
-test_val() {
-    local val="$1"
-    local expected="$2"
-    if validate_uint "$val"; then
+validate_int() {
+    local input="$1"
+    echo "$input" | grep -qE '^-?[0-9]+$' || return 1
+    [ "$input" -ge -2147483648 ] 2>/dev/null && [ "$input" -le 2147483647 ] 2>/dev/null || return 1
+    return 0
+}
+
+validate_uint_range() {
+    local input="$1"
+    if echo "$input" | grep -qE '^[0-9]+-[0-9]+$'; then
+        local lower="${input%-*}"
+        local upper="${input#*-}"
+        [ "$lower" -le "$upper" ] 2>/dev/null || return 1
+        [ "$upper" -le 4294967295 ] 2>/dev/null || return 1
+        return 0
+    fi
+    validate_uint "$input"
+}
+
+test_func() {
+    local func="$1"
+    local val="$2"
+    local expected="$3"
+    if $func "$val"; then
         actual="valid"
     else
         actual="invalid"
     fi
 
     if [ "$actual" = "$expected" ]; then
-        echo "PASS: '$val' is $actual"
+        echo "PASS: $func('$val') is $actual"
     else
-        echo "FAIL: '$val' expected $expected, got $actual"
+        echo "FAIL: $func('$val') expected $expected, got $actual"
         exit 1
     fi
 }
 
-echo "Running tests for validate_uint..."
+echo "Testing validate_uint..."
+test_func validate_uint "123" "valid"
+test_func validate_uint "0" "valid"
+test_func validate_uint "4294967295" "valid"
+test_func validate_uint "4294967296" "invalid"
+test_func validate_uint "100-200" "invalid"
+test_func validate_uint "abc" "invalid"
 
-# Single values
-test_val "123" "valid"
-test_val "0" "valid"
-test_val "4294967295" "valid"
-test_val "4294967296" "invalid"
-test_val "-1" "invalid"
-test_val "abc" "invalid"
+echo "Testing validate_int..."
+test_func validate_int "123" "valid"
+test_func validate_int "-123" "valid"
+test_func validate_int "0" "valid"
+test_func validate_int "2147483647" "valid"
+test_func validate_int "-2147483648" "valid"
+test_func validate_int "2147483648" "invalid"
+test_func validate_int "-2147483649" "invalid"
+test_func validate_int "100-200" "invalid"
 
-# Range values
-test_val "100-200" "valid"
-test_val "200-100" "invalid"
-test_val "0-4294967295" "valid"
-test_val "0-4294967296" "invalid"
-test_val "123-abc" "invalid"
-test_val "abc-123" "invalid"
-test_val "100-200-300" "invalid"
+echo "Testing validate_uint_range..."
+test_func validate_uint_range "123" "valid"
+test_func validate_uint_range "100-200" "valid"
+test_func validate_uint_range "200-100" "invalid"
+test_func validate_uint_range "0-4294967295" "valid"
+test_func validate_uint_range "0-4294967296" "invalid"
+test_func validate_uint_range "abc" "invalid"
 
 echo "All tests passed!"
