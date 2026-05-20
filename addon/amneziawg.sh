@@ -21,6 +21,7 @@ DNSMASQ_AWG_CONF="$AWG_DIR/dnsmasq_awg.conf"
 DNSMASQ_INCLUDE="/jffs/configs/dnsmasq.conf.add"
 SCRIPT_NAME="amneziawg"
 RT_TABLE=300
+AWG_LOG_LEVEL="debug" # info, error, or debug
 AWG_CHAIN="AWG"
 LOCKDIR="/tmp/.awg_lock"
 V2FLY_GEOIP_BASE="https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text"
@@ -830,7 +831,7 @@ do_start(){
     # Start userspace daemon
     mkdir -p /var/run/amneziawg
     log_msg "Starting amneziawg-go daemon for $IFACE..."
-    "$AWG_GO" "$IFACE" > /tmp/awg_daemon.log 2>&1 &
+    LOG_LEVEL="$AWG_LOG_LEVEL" "$AWG_GO" "$IFACE" > /tmp/awg_daemon.log 2>&1 &
     if ! wait_for_iface "$IFACE" 10; then
         log_msg "ERROR: amneziawg-go failed to create interface $IFACE"
         [ -f /tmp/awg_daemon.log ] && log_msg "Daemon output: $(cat /tmp/awg_daemon.log)"
@@ -1168,7 +1169,14 @@ do_watchdog(){
     elif ! pidof amneziawg-go >/dev/null 2>&1; then
         reason="amneziawg-go process dead"
     elif ! ping -c 1 -W 5 -I "$IFACE" 8.8.8.8 >/dev/null 2>&1; then
-        reason="tunnel not passing traffic"
+        local handshake
+        handshake=$("$AWG_BIN" show "$IFACE" latest-handshakes 2>/dev/null | awk '{print $2}')
+        local hs_msg="no handshake"
+        if [ -n "$handshake" ] && [ "$handshake" != "0" ]; then
+            local now=$(date +%s)
+            hs_msg="last handshake $((now - handshake))s ago"
+        fi
+        reason="tunnel not passing traffic ($hs_msg)"
     fi
 
     if [ -n "$reason" ]; then
