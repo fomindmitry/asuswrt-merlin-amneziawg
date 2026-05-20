@@ -697,14 +697,29 @@ generate_config(){
     # I1-I5 from base64-encoded setting
     local i1="" i2="" i3="" i4="" i5=""
     local initdata=$(get_setting awg_initdata)
+
     if [ -n "$initdata" ]; then
         local decoded
-        decoded=$(echo "$initdata" | base64 -d 2>/dev/null)
-        i1=$(echo "$decoded" | awk '/^I1 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
-        i2=$(echo "$decoded" | awk '/^I2 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
-        i3=$(echo "$decoded" | awk '/^I3 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
-        i4=$(echo "$decoded" | awk '/^I4 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
-        i5=$(echo "$decoded" | awk '/^I5 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
+        
+        # Try standard base64 -d
+        if which base64 >/dev/null 2>&1; then
+            decoded=$(echo "$initdata" | base64 -d 2>/dev/null)
+        fi
+
+        if [ -z "$decoded" ] && which openssl >/dev/null 2>&1; then
+            # Using openssl as fallback (standard on Merlin)
+            decoded=$(echo "$initdata" | openssl enc -base64 -d -A 2>/dev/null)
+        fi
+
+        if [ -n "$decoded" ]; then
+            i1=$(echo "$decoded" | awk '/^I1 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
+            i2=$(echo "$decoded" | awk '/^I2 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
+            i3=$(echo "$decoded" | awk '/^I3 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
+            i4=$(echo "$decoded" | awk '/^I4 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
+            i5=$(echo "$decoded" | awk '/^I5 /{sub(/^[^=]+=[ ]?/,"");print;exit}')
+        else
+            log_msg "ERROR: Failed to decode initdata"
+        fi
     fi
 
     local peer_pubkey=$(get_setting awg_peer_pubkey)
