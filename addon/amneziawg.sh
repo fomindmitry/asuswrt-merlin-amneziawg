@@ -22,6 +22,7 @@ DNSMASQ_AWG_CONF="$AWG_DIR/dnsmasq_awg.conf"
 DNSMASQ_INCLUDE="/jffs/configs/dnsmasq.conf.add"
 SCRIPT_NAME="amneziawg"
 RT_TABLE=300
+AWG_LOG_LEVEL="debug" # info, error, or debug
 AWG_CHAIN="AWG"
 LOCKDIR="/tmp/.awg_lock"
 V2FLY_GEOIP_BASE="https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text"
@@ -128,6 +129,11 @@ wait_for_iface(){
 
 acquire_lock(){
     local tries=0
+    # Check if we already hold the lock
+    if [ -f "$LOCKDIR/pid" ] && [ "$(cat "$LOCKDIR/pid" 2>/dev/null)" = "$$" ]; then
+        return 0
+    fi
+
     while ! mkdir "$LOCKDIR" 2>/dev/null; do
         if [ -f "$LOCKDIR/pid" ]; then
             local old_pid
@@ -145,7 +151,10 @@ acquire_lock(){
 }
 
 release_lock(){
-    rm -rf "$LOCKDIR"
+    # Only release if we are the owner
+    if [ "$(cat "$LOCKDIR/pid" 2>/dev/null)" = "$$" ]; then
+        rm -rf "$LOCKDIR"
+    fi
 }
 
 human_size(){
@@ -385,6 +394,7 @@ cleanup_firewall(){
 
 setup_firewall(){
     local keep_cron="${1:-init_cron}"
+    acquire_lock || { log_msg "ERROR: Cannot acquire lock for setup_firewall"; return 1; }
     cleanup_firewall
 
     local default_policy=$(get_setting awg_default_policy)
@@ -569,17 +579,25 @@ setup_firewall(){
         log_msg "Restarting dnsmasq with new domain rules..."
         service restart_dnsmasq >/dev/null 2>&1
         wait_for_dns 10
-        # Pre-resolve domains to populate ipset
+        # Pre-resolve domains to populate ipset in background
         if [ -f "$DNSMASQ_AWG_CONF" ]; then
-            log_msg "Pre-resolving domains to populate ipset..."
-            local bg_count=0
-            awk -F/ '/^ipset=/{for(i=2;i<NF;i++)print $i}' "$DNSMASQ_AWG_CONF" | while read -r domain; do
-                [ -z "$domain" ] && continue
-                nslookup "$domain" 127.0.0.1 >/dev/null 2>&1 &
-                bg_count=$((bg_count + 1))
-                [ $bg_count -ge 10 ] && { wait; bg_count=0; }
-            done
-            wait
+            (
+                # Use a subshell to avoid affecting the main script
+                log_msg "Pre-resolving domains to populate ipset (background)..."
+                local bg_count=0
+                # Increase batch size and optimize extraction
+                awk -F/ '/^ipset=/{for(i=2;i<NF;i++)print $i}' "$DNSMASQ_AWG_CONF" | while read -r domain; do
+                    [ -z "$domain" ] && continue
+                    nslookup "$domain" 127.0.0.1 >/dev/null 2>&1 &
+                    bg_count=$((bg_count + 1))
+                    if [ $bg_count -ge 20 ]; then
+                        wait
+                        bg_count=0
+                    fi
+                done
+                wait
+                log_msg "Pre-resolution finished"
+            ) &
         fi
     fi
 
@@ -594,6 +612,7 @@ setup_firewall(){
     fi
 
     log_msg "Firewall configured: $ip_count IPs, $domain_count domains"
+    release_lock
 }
 
 save_clients(){
@@ -817,6 +836,13 @@ do_start(){
 
     acquire_lock || { log_msg "ERROR: Cannot acquire lock, aborting start"; update_status; return 1; }
 
+    # Ensure no stale daemon is running (even if interface is missing)
+    if pidof amneziawg-go >/dev/null 2>&1; then
+        log_msg "WARNING: amneziawg-go already running without interface, cleaning up..."
+        killall -9 amneziawg-go 2>/dev/null
+        sleep 1
+    fi
+
     log_msg "Generating configuration..."
     generate_config || { log_msg "ERROR: Configuration generation failed"; update_status; release_lock; return 1; }
     [ ! -f "$CONF" ] && { log_msg "ERROR: No config file found at $CONF"; update_status; release_lock; return 1; }
@@ -857,10 +883,21 @@ do_start(){
         # Start userspace daemon
         mkdir -p /var/run/amneziawg
         log_msg "Starting amneziawg-go daemon for $IFACE..."
-        GOGC=20 "$AWG_GO" "$IFACE" > /tmp/awg_daemon.log 2>&1 &
+        echo "--- Daemon starting at $(date) ---" >> /tmp/awg_daemon.log
+        
+        # Diagnostics: check if kernel module is loaded
+        if lsmod | grep -q "amneziawg"; then
+            log_msg "WARNING: AmneziaWG kernel module is loaded! This may conflict with userspace daemon."
+        fi
+
+
+        # Optimize Go runtime for memory-constrained router environment
+        # 320MiB is the limit for 512MB RAM routers to prevent heap expansion beyond physical limits.
+        # GOGC=20 triggers more frequent garbage collection to keep heap size minimal.
+        GOMEMLIMIT=320MiB GOGC=20 LOG_LEVEL="$AWG_LOG_LEVEL" "$AWG_GO" "$IFACE" >> /tmp/awg_daemon.log 2>&1 &        
         if ! wait_for_iface "$IFACE" 10; then
             log_msg "ERROR: amneziawg-go failed to create interface $IFACE"
-            [ -f /tmp/awg_daemon.log ] && log_msg "Daemon output: $(cat /tmp/awg_daemon.log)"
+            [ -f /tmp/awg_daemon.log ] && log_msg "Daemon output (tail): $(tail -n 20 /tmp/awg_daemon.log)"
             update_status; release_lock; return 1
         fi
         log_msg "Userspace daemon started"
@@ -1004,19 +1041,21 @@ do_stop(){
     # Stop daemon
     log_msg "Tearing down interface $IFACE..."
     ip link set "$IFACE" down 2>/dev/null
-    ip link del "$IFACE" 2>/dev/null
+    
     local awg_pid
     awg_pid=$(pidof amneziawg-go 2>/dev/null)
     if [ -n "$awg_pid" ]; then
         log_msg "Killing amneziawg-go daemon (PID $awg_pid)..."
         kill "$awg_pid" 2>/dev/null
-        wait_for_pid_exit amneziawg-go 5
-        # Force kill if still alive (crashed/stuck process)
-        if pidof amneziawg-go >/dev/null 2>&1; then
+        if ! wait_for_pid_exit amneziawg-go 5; then
             log_msg "WARNING: amneziawg-go still alive, force killing..."
-            kill -9 "$(pidof amneziawg-go)" 2>/dev/null
+            kill -9 $awg_pid 2>/dev/null
+            wait_for_pid_exit amneziawg-go 5
         fi
     fi
+    
+    # Finally delete interface (should be gone if daemon died, but just in case)
+    ip link del "$IFACE" 2>/dev/null
     rm -f /var/run/amneziawg/"$IFACE".sock
 
     if lsmod | grep -q amneziawg; then
@@ -1031,8 +1070,7 @@ do_stop(){
 
     log_msg "Restarting dnsmasq..."
     service restart_dnsmasq >/dev/null 2>&1 &
-    wait_for_dns 10
-
+    
     log_msg "Stopped"
     update_status
     if [ "$no_lock" != "no_lock" ]; then
@@ -1205,38 +1243,31 @@ do_watchdog(){
     local reason=""
     if ! ip link show "$IFACE" >/dev/null 2>&1; then
         reason="interface $IFACE missing"
+        # Diagnostics
+        if pidof amneziawg-go >/dev/null 2>&1; then
+            log_msg "WATCHDOG DEBUG: Interface missing but amneziawg-go (PID $(pidof amneziawg-go)) is still running!"
+            [ -f /tmp/awg_daemon.log ] && log_msg "WATCHDOG DEBUG: Last daemon logs: $(tail -n 5 /tmp/awg_daemon.log)"
+        else
+            log_msg "WATCHDOG DEBUG: Both interface and daemon are gone"
+        fi
     elif ! pidof amneziawg-go >/dev/null 2>&1 && ! lsmod | grep -q amneziawg; then
         reason="backend process/module dead"
-    else
-        # Check connectivity
-        local ping_ok=false
-        for target in 8.8.8.8 1.1.1.1; do
-            if ping -c 1 -W 5 -I "$IFACE" "$target" >/dev/null 2>&1; then
-                ping_ok=true
-                break
-            fi
-        done
-
-        if [ "$ping_ok" = false ]; then
-            # Pings failed, check handshake age as last resort
-            local handshake
-            handshake=$("$AWG_BIN" show "$IFACE" latest-handshakes 2>/dev/null | awk '{print $2}')
-            if [ -n "$handshake" ] && [ "$handshake" != "0" ]; then
-                local now=$(date +%s)
-                local diff=$((now - handshake))
-                if [ $diff -lt 180 ]; then
-                    # Handshake is fresh (< 3 min), don't restart even if pings fail
-                    return 0
-                fi
-                reason="tunnel not passing traffic (handshake too old: ${diff}s)"
-            else
-                reason="tunnel not passing traffic (no handshake)"
-            fi
+       # Use 3 pings with 2s timeout each for better resilience against single packet loss
+    elif ! ping -c 3 -W 2 -I "$IFACE" 8.8.8.8 >/dev/null 2>&1; then
+        local handshake
+        handshake=$("$AWG_BIN" show "$IFACE" latest-handshakes 2>/dev/null | awk '{print $2}')
+        local hs_msg="no handshake"
+        if [ -n "$handshake" ] && [ "$handshake" != "0" ]; then
+            local now=$(date +%s)
+            hs_msg="last handshake $((now - handshake))s ago"
         fi
+        reason="tunnel not passing traffic ($hs_msg)"
     fi
 
     if [ -n "$reason" ]; then
         log_msg "WATCHDOG: $reason, restarting"
+        # Log memory status before restart for diagnostics
+        log_msg "WATCHDOG DEBUG: $(free | awk '/Mem:/{printf "Memory: total=%d, used=%d, free=%d", $2, $3, $4}')"
         do_stop "keep_cron" 2>/dev/null
         wait_for_pid_exit amneziawg-go 10
         do_start "keep_cron"
