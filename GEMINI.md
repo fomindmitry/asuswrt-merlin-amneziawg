@@ -25,10 +25,10 @@ DOCKER_BUILDKIT=1 docker build -f Dockerfile.arm32 --output=output . # ARMv7
 ## Architecture
 
 ### Userspace vs Kernel Module
-While an AmneziaWG kernel module is available, this project defaults to **`amneziawg-go` (userspace)** for maximum compatibility.
-- **Why:** The kernel module conflicts with the ASUS "Flow Control" (Hardware Acceleration) feature on many models, leading to system instability or bypass of VPN routing.
-- **Automated FlowCache Management:** If the kernel module (`amneziawg.ko`) is used, the script automatically executes `fc disable` during startup and `fc enable` during stop to maintain stability.
-- **Fallback Mechanism:** The backend attempts to load the kernel module first if present; if it fails to load or create the interface, it gracefully falls back to the userspace `amneziawg-go` daemon.
+While an AmneziaWG kernel module is available, this project defaults to **`amneziawg-go` (userspace)** for maximum compatibility and stability.
+- **Why:** The kernel module conflicts with the ASUS "Flow Control" (Hardware Acceleration) feature on many models, leading to system instability or bypass of VPN routing. Userspace implementation avoids these kernel-level conflicts.
+- **Diagnostics:** The script checks for the presence of the `amneziawg` kernel module and issues a warning if found to prevent potential conflicts with the userspace daemon.
+- **Process Robustness:** `do_start` proactively cleans up any orphaned `amneziawg-go` processes, and `do_stop` ensures a clean shutdown with a 5-second wait and `kill -9` fallback.
 
 ### Memory & Performance Optimizations (Critical)
 
