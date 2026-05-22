@@ -34,9 +34,9 @@ The system supports both implementations, managed via the `AWG_IMPLEMENTATION` t
 ### Memory & Performance Optimizations (Critical)
 
 Low-RAM routers (512MB) require specific tuning:
-- **Bounded Pools:** `amneziawg-go` is patched in `Dockerfile.go` to set `PreallocatedBuffersPerPool = 1024`. Default `0` leads to unbounded OOM.
+- **Bounded Pools:** `amneziawg-go` is patched in `Dockerfile.go` to set `PreallocatedBuffersPerPool = 512`. This provides backpressure and prevents OOM during high-traffic bursts.
 - **Queue Sizes:** Internal queues (Inbound/Outbound/Handshake) must be maintained at **1024**. Reducing these to 256 or 512 (to save RAM) causes protocol deadlocks and handshake loops on the RT-AX5400.
-- **Go Runtime:** Started with `GOMEMLIMIT=320MiB` and `GOGC=20` to keep heap usage minimal.
+- **Go Runtime:** Started with `GOMEMLIMIT=192MiB` and `GOGC=20` to keep heap usage minimal and avoid competing with system services.
 - **Vectorized Pipelines:** 
   - **GeoSite Extraction:** Uses a single-pass `awk` pipeline (`extract_v2fly_domains`) to parse the 20MB+ v2fly domain database, writing multiple category files simultaneously. This is ~10x faster than traditional grep/sed loops.
   - **Ipset Loading:** Utilizes `ipset restore` for bulk loading CIDR lists, reducing firewall setup time from minutes to seconds.

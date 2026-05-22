@@ -22,7 +22,7 @@ DNSMASQ_AWG_CONF="$AWG_DIR/dnsmasq_awg.conf"
 DNSMASQ_INCLUDE="/jffs/configs/dnsmasq.conf.add"
 SCRIPT_NAME="amneziawg"
 RT_TABLE=300
-AWG_LOG_LEVEL="debug" # info, error, or debug
+AWG_LOG_LEVEL="error" # info, error, or debug
 AWG_IMPLEMENTATION="userspace" # "kernel", "userspace", or "auto"
 AWG_CHAIN="AWG"
 LOCKDIR="/tmp/.awg_lock"
@@ -893,9 +893,9 @@ do_start(){
 
 
         # Optimize Go runtime for memory-constrained router environment
-        # 320MiB is the limit for 512MB RAM routers to prevent heap expansion beyond physical limits.
+        # 192MiB is a safe limit for 512MB RAM routers to prevent heap expansion beyond physical limits.
         # GOGC=20 triggers more frequent garbage collection to keep heap size minimal.
-        GOMEMLIMIT=320MiB GOGC=20 LOG_LEVEL="$AWG_LOG_LEVEL" "$AWG_GO" "$IFACE" >> /tmp/awg_daemon.log 2>&1 &        
+        GOMEMLIMIT=192MiB GOGC=20 LOG_LEVEL="$AWG_LOG_LEVEL" "$AWG_GO" "$IFACE" >> /tmp/awg_daemon.log 2>&1 &        
         if ! wait_for_iface "$IFACE" 10; then
             log_msg "ERROR: amneziawg-go failed to create interface $IFACE"
             [ -f /tmp/awg_daemon.log ] && log_msg "Daemon output (tail): $(tail -n 20 /tmp/awg_daemon.log)"

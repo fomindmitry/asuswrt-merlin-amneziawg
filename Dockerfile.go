@@ -22,7 +22,7 @@ RUN git clone --depth 1 --branch ${AWG_GO_VERSION} \
 # Default in v0.2.18 is 0 (unbounded).
 # 1024 is the standard WireGuard-Go limit, but here we enforce it to prevent infinite growth.
 RUN cd amneziawg-go && \
-    sed -i 's/PreallocatedBuffersPerPool = 0/PreallocatedBuffersPerPool = 1024/' device/queueconstants_default.go && \
+    sed -i 's/PreallocatedBuffersPerPool = 0/PreallocatedBuffersPerPool = 512/' device/queueconstants_default.go && \
     sed -i 's/QueueOutboundSize = 1024/QueueOutboundSize = 1024/' device/queueconstants_default.go && \
     sed -i 's/QueueInboundSize = 1024/QueueInboundSize = 1024/' device/queueconstants_default.go && \
     sed -i 's/QueueHandshakeSize = 1024/QueueHandshakeSize = 1024/' device/queueconstants_default.go
