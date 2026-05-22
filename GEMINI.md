@@ -49,18 +49,22 @@ Low-RAM routers (512MB) require specific tuning:
 - **IPv6 Leak Protection:** Automatically injects `ip6tables` REJECT rules when the tunnel is active to prevent traffic leaking via IPv6 if the ISP provides it.
 - **Resilient Watchdog:** The 5-minute watchdog checks connectivity via pings (3 attempts with 2s timeout). If pings fail, it captures the **Handshake Age** for logging and diagnostics. To prevent maintenance tasks from wiping out scheduled jobs, `do_start` and `setup_firewall` default to `init_cron` for initial provisioning, while maintenance and restart routines (like the watchdog) explicitly pass a `keep_cron` flag to preserve existing cron scheduling.
 - **Health Check & Rollback:** On startup, the script performs a 60-second connectivity test. To prevent race conditions, a global execution lock is held throughout the entire **Start → Verify → Rollback** sequence. If the tunnel fails to pass traffic, it automatically rolls back firewall changes and stops the daemon using a `no_lock` bypass to prevent deadlocks.
-- **Atomic Locking:** All service actions (start, stop, restart, watchdog) are synchronized via a `/tmp/.awg_lock` directory. The lock duration is specifically extended to cover the asynchronous health check loop, preventing overlapping execution attempts from multiple sources (e.g., manual UI action + cron watchdog).
-- **Synchronous Initialization:** Core firewall setup and domain resolution remain synchronous to ensure routing tables and `ipset` entries are fully populated before the tunnel is verified. This deterministic flow prevents race conditions where traffic might leak before routing rules are active. Web UI polling (90 attempts / 3 mins) is calibrated to accommodate this processing time on all supported hardware.
+- **Atomic Locking:** All service actions (start, stop, restart, watchdog) are synchronized via a `/tmp/.awg_lock` directory. The lock is **re-entrant** (owner-aware via PID), allowing internal functions (like `setup_firewall`) to be called from within a locked start sequence without deadlocking. The lock duration is specifically extended to cover the asynchronous health check loop, preventing overlapping execution attempts from multiple sources.
+- **Background Pre-resolution:** Domain pre-resolution (populating `ipset` via `nslookup`) is performed in the **background** during firewall setup. This prevents blocking the main execution loop (and the system's `service-event` queue) for several minutes, especially on routers with thousands of domains. This change mitigates "RT throttling" and system-wide service timeouts during DHCP renewals or manual saves.
 
 ### Logging & Observability
 
 - **System Logger:** All logs are dispatched via `log_msg` to the system syslog (`logger -t amneziawg`).
-- **Daemon Logs:** `amneziawg-go` output is captured in `/tmp/awg_daemon.log` to assist in diagnosing startup failures or crash loops.
+- **Daemon Logs:** `amneziawg-go` output is captured in `/tmp/awg_daemon.log`. To prevent data loss during watchdog restarts, the log is opened in **append mode** (`>>`) and includes a "Daemon starting" marker with a timestamp for each session.
+- **Diagnostic Watchdog:** The watchdog includes diagnostic checks (e.g., verifying if the daemon process is alive even if the interface is missing) to aid in troubleshooting "zombie" processes or interface creation failures.
 - **Conventions:** 
   - **ERROR:** Prefixed with `ERROR:` for critical failures (e.g., config missing, daemon crash).
   - **WARNING:** Prefixed with `WARNING:` for non-fatal issues (e.g., ipset full, geo download failed).
   - **INFO:** Plain text for lifecycle events and status changes.
 - **Lifecycle Traceability:** The `do_start`, `do_stop`, and `setup_firewall` functions provide a granular trace of operations (e.g., config generation, TUN preparation, ipset creation, route injection). This allows for deep troubleshooting of VPN startup sequences directly from the router's system log.
+- **Robust Process Management:** 
+  - **Start Cleanup:** `do_start` proactively kills any orphaned `amneziawg-go` processes to prevent port/TUN contention.
+  - **Graceful Stop:** `do_stop` attempts to kill the daemon *before* deleting the interface, ensuring a clean state transition and allowing the daemon to shut down naturally. It uses a 5-second wait with a `kill -9` fallback.
 - **Connectivity Monitoring:** The health check loop logs its progress and failure reasons to aid in diagnosing endpoint reachability or obfuscation parameter issues.
 
 ### Testing & Quality Assurance
