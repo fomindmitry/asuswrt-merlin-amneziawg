@@ -25,17 +25,34 @@ DOCKER_BUILDKIT=1 docker build -f Dockerfile.arm32 --output=output . # ARMv7
 ## Architecture
 
 ### Userspace vs Kernel Module
-While an AmneziaWG kernel module is available, this project defaults to **`amneziawg-go` (userspace)**.
-- **Why:** The kernel module conflicts with the ASUS "Flow Control" (Hardware Acceleration) feature on many models, leading to system instability or bypass of VPN routing. The userspace daemon via TUN interface is more stable across diverse Merlin hardware.
+While an AmneziaWG kernel module is available, this project defaults to **`amneziawg-go` (userspace)** for maximum compatibility.
+- **Why:** The kernel module conflicts with the ASUS "Flow Control" (Hardware Acceleration) feature on many models, leading to system instability or bypass of VPN routing.
+- **Automated FlowCache Management:** If the kernel module (`amneziawg.ko`) is used, the script automatically executes `fc disable` during startup and `fc enable` during stop to maintain stability.
+- **Fallback Mechanism:** The backend attempts to load the kernel module first if present; if it fails to load or create the interface, it gracefully falls back to the userspace `amneziawg-go` daemon.
 
-### Memory Optimizations (Critical)
+### Memory & Performance Optimizations (Critical)
 
-Low-RAM routers (512MB) require specific tuning for `amneziawg-go` stability:
-- **Bounded Pools:** `amneziawg-go` is patched in `Dockerfile.go` to set `PreallocatedBuffersPerPool = 1024`. Default `0` leads to unbounded OOM during 4K streaming.
-- **Queue Sizes:** Internal queues (Inbound/Outbound/Handshake) are maintained at **1024**. Reducing these to 256 or 512 results in protocol deadlocks and handshake loops during high-load scenarios.
-- **Go Runtime:** `addon/amneziawg.sh` starts the daemon with `GOMEMLIMIT=320MiB` and `GOGC=20` to prevent heap exhaustion.
-- **Resilient Watchdog:** The 5-minute watchdog uses 3 pings to verify connectivity, preventing full restarts on transient packet loss.
-- **Async Processing:** Domain pre-resolution and firewall setup utilize background subshells and robust locking to prevent UI hangs.
+Low-RAM routers (512MB) require specific tuning:
+- **Bounded Pools:** `amneziawg-go` is patched in `Dockerfile.go` to set `PreallocatedBuffersPerPool = 1024`. Default `0` leads to unbounded OOM.
+- **Queue Sizes:** Internal queues (Inbound/Outbound/Handshake) must be maintained at **1024**. Reducing these to 256 or 512 (to save RAM) causes protocol deadlocks and handshake loops on the RT-AX5400.
+- **Go Runtime:** Started with `GOMEMLIMIT=320MiB` and `GOGC=20` to keep heap usage minimal.
+- **Vectorized Pipelines:** 
+  - **GeoSite Extraction:** Uses a single-pass `awk` pipeline to parse the 20MB+ v2fly domain database, writing multiple category files simultaneously. This is ~10x faster than traditional grep/sed loops.
+  - **Ipset Loading:** Utilizes `ipset restore` for bulk loading CIDR lists, reducing firewall setup time from minutes to seconds.
+  - **Dnsmasq Batching:** Domains are batched (20 per line) into `dnsmasq` configuration to minimize process overhead.
+
+### Routing & Security Model
+
+- **Policy Routing:** Three policies per device: `vpn_all` (table 200), `vpn_geo` (ipset match + table 200), or `direct`.
+- **DNS Interception:** When VPN is active, the script forces all LAN DNS traffic (port 53) to the router's `dnsmasq` and rejects outgoing DoH (port 443) to known providers. This ensures GeoSite domain-based routing is never bypassed by client-side DNS settings.
+- **IPv6 Leak Protection:** Automatically injects `ip6tables` REJECT rules when the tunnel is active to prevent traffic leaking via IPv6 if the ISP provides it.
+- **Resilient Watchdog:** The 5-minute watchdog checks connectivity via pings. If pings fail, it verifies the **Handshake Age**; if a handshake occurred within the last 3 minutes, it avoids a redundant restart, assuming transient packet loss.
+- **Health Check & Rollback:** On startup, the script performs a 60-second connectivity test. If the tunnel fails to pass traffic (e.g., due to invalid obfuscation parameters), it automatically stops the VPN and rolls back firewall changes to prevent a total network lockout.
+- **Async Processing:** Domain pre-resolution and firewall setup utilize background subshells to prevent UI hangs. After `dnsmasq` restart, a background task pre-resolves configured GeoSite domains to populate the `ipset` immediately.
+
+**Best Practices for VPN Geo:**
+- **GeoIP (IP-based):** Best for messaging apps (Telegram) or services with stable IP ranges (Cloudflare, Microsoft). Avoid overly broad ranges like "google" unless necessary.
+- **GeoSite (Domain-based):** Preferred for massive CDNs (YouTube, TikTok, Netflix) or developer services (category-dev, github). Precise and memory-efficient.
 
 ### Build pipeline (`Dockerfile`)
 Multi-stage Docker build: downloads Merlin toolchain + kernel source, applies router's kernel config, builds out-of-tree AmneziaWG kernel module and userspace tools from upstream repos. Uses `docker build --output` to export artifacts.
@@ -43,29 +60,33 @@ Multi-stage Docker build: downloads Merlin toolchain + kernel source, applies ro
 ### Router-side components
 
 **`addon/amneziawg.sh`** — Main backend script (runs on router). Handles:
-- Interface lifecycle: `start`/`stop`/`restart` (insmod, ip link, awg setconf, iptables, ip rule)
-- Config generation: Reads from `custom_settings.txt`. Obfuscation parameters `I1-I5` are stored individually (e.g., `awg_i1`) to bypass single-variable length limits in Merlin's storage.
-- Per-device routing policy: `vpn_all`, `vpn_geo`, `direct` via ip rules + iptables mangle marks
-- GeoIP/GeoSite: Dynamic GeoIP downloading based on `awg_geo_v2fly_ip`. Populates `ipset` (`awg_dst`) + `dnsmasq` ipset rules.
-- Web UI addon mounting via Merlin Addons API (`am_get_webui_page`, menuTree.js bind mount)
-- Service event dispatch (called from `/jffs/scripts/service-event`)
+- **Interface Lifecycle:** `start`/`stop`/`restart` (insmod/rmmod, ip link, awg setconf, iptables, ip rule).
+- **Config Generation:** Reads from `custom_settings.txt`. Obfuscation parameters `I1-I5` are stored in a single base64-encoded variable `awg_initdata` to support long hex-encoded strings (up to 2048 chars) and bypass storage character limits.
+- **Per-device Routing Policy:** Managed via `vpn_all`, `vpn_geo`, or `direct` policies using `iptables` mangle marks and `ip rule` priority levels.
+- **GeoIP/GeoSite:** Dynamic GeoIP downloading and vectorized GeoSite extraction. Populates `ipset` (`awg_dst`) and generates `dnsmasq` ipset rules.
+- **Service Event Dispatch:** Integrated with Merlin's `service-event` and `wan-event` hooks for automatic lifecycle management.
 
-**`addon/amneziawg_page.asp`** — Web UI page (ROG-styled ASP). Communicates with backend via Merlin's `httpApi` custom settings and service events. Features a case-insensitive configuration importer and support for long hex-encoded obfuscation strings (max 2048 chars).
+**`addon/amneziawg_page.asp`** — Web UI page (ROG-styled ASP). Communicates with backend via Merlin's `httpApi` and service events. Features:
+- **Case-insensitive Importer:** Supports standard WireGuard/AmneziaWG `.conf` files.
+- **Autocomplete:** Integrated autocomplete for v2fly GeoSite categories and GeoIP services.
+- **Live Status:** Real-time monitoring of tunnel traffic, handshake age, and active routing rules.
 
-**`install.sh`** — One-shot installer (runs on router via SSH). Copies files, tests module loading, creates init script, installs addon page.
+**`install.sh`** — One-shot installer (runs on router via SSH). Copies files, tests environment compatibility, creates init scripts, and installs the Web UI addon.
 
 ### Key paths on router
-- `/opt/amneziawg/` — module, tool, config, client list, geo data
-- `/jffs/addons/amneziawg/` — addon script + ASP page
-- `/jffs/configs/dnsmasq.conf.add` — domain-based routing rules (tagged with `### AmneziaWG`)
-- `/jffs/addons/custom_settings.txt` — Merlin settings store (all keys prefixed `awg_`)
+- `/opt/amneziawg/` — binaries (`awg`, `amneziawg-go`), kernel module (`amneziawg.ko`), config, and geo data.
+- `/jffs/addons/amneziawg/` — addon script and ASP page.
+- `/jffs/configs/dnsmasq.conf.add` — domain-based routing rules (tagged with `### AmneziaWG`).
+- `/jffs/addons/custom_settings.txt` — Merlin settings store (all keys prefixed `awg_`).
 
 ### Routing model
-Three policies per device: `vpn_all` (ip rule → table 200), `vpn_geo` (iptables fwmark 0x100 + ipset match → table 200), `direct`. 
-
-**Best Practices for VPN Geo:**
-- **GeoIP (IP-based):** Best for messaging apps (Telegram) or services with stable IP ranges (Cloudflare, Microsoft). Avoid overly broad ranges like "google" unless necessary.
-- **GeoSite (Domain-based):** Preferred for massive CDNs (YouTube, TikTok, Netflix) or developer services (category-dev, github). Precise and memory-efficient.
+- **Table 200:** Dedicated routing table for VPN traffic.
+- **FWMARK 0x100:** Used to tag traffic for GeoIP/GeoSite matching.
+- **Priority Rules:**
+  - `prio 97`: Direct traffic (exclusions).
+  - `prio 98`: Marked traffic (GeoIP/GeoSite) -> Table 200.
+  - `prio 99`: VPN-all traffic -> Table 200.
+  - `prio 100`: Router-originated traffic (optional).
 
 ## Shell scripting notes
 
