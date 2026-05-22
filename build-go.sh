@@ -11,6 +11,7 @@ ARCH="${2:-arm}"
 ARM_VER="${3:-7}"
 
 echo "Building amneziawg-go ${VERSION} for ${ARCH} (ARM v${ARM_VER})..."
+echo "NOTE: Applying memory optimization patches (bounded buffer pools)..."
 
 DOCKER_BUILDKIT=1 docker build \
     -f Dockerfile.go \
