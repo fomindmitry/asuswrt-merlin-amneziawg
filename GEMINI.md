@@ -55,6 +55,7 @@ Low-RAM routers (512MB) require specific tuning:
 ### Logging & Observability
 
 - **System Logger:** All logs are dispatched via `log_msg` to the system syslog (`logger -t amneziawg`).
+- **Daemon Logs:** `amneziawg-go` output is captured in `/tmp/awg_daemon.log` to assist in diagnosing startup failures or crash loops.
 - **Conventions:** 
   - **ERROR:** Prefixed with `ERROR:` for critical failures (e.g., config missing, daemon crash).
   - **WARNING:** Prefixed with `WARNING:` for non-fatal issues (e.g., ipset full, geo download failed).
